@@ -1,0 +1,13 @@
+{
+  "summary": {
+    "generatedAt": "",
+    "apiBase": "http://localhost:3000",
+    "totalCases": 0,
+    "improvedCases": 0,
+    "improvementRate": 0,
+    "meanComplexityDeltaPct": 0,
+    "meanAvgWordsPerSentenceDeltaPct": 0,
+    "failureCriteria": "Run npm run eval to populate"
+  },
+  "perCase": []
+}

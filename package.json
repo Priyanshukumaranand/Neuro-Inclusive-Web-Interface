@@ -1,0 +1,18 @@
+{
+  "name": "neuro-inclusive-web",
+  "private": true,
+  "workspaces": [
+    "server",
+    "extension"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev --workspace server",
+    "dev:extension": "npm run dev --workspace extension",
+    "build:extension": "npm run build --workspace extension",
+    "build:server": "npm run build --workspace server",
+    "eval": "node scripts/evaluate.mjs",
+    "test:unit": "node --import tsx tests/test-cognitive-load.ts && node --import tsx tests/test-profiles.ts",
+    "test:api": "node --import tsx tests/test-api.ts",
+    "test": "npm run test:unit"
+  }
+}
