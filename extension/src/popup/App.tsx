@@ -4,6 +4,7 @@ import { sendToActiveTab } from "./tab.js";
 import type { BackgroundRequest, BackgroundResponse } from "../shared/messages.js";
 
 import { computeCognitiveLoad } from "../shared/cognitiveLoad.js";
+import { localSimplify, localSummarize } from "../shared/localAiFallback.js";
 import { PROFILE_LIST } from "../shared/profiles.js";
 
 async function bgApi(msg: BackgroundRequest): Promise<BackgroundResponse> {
@@ -32,6 +33,8 @@ export default function App() {
     s.readabilityMode,
     s.distractionReduction,
     s.focusMode,
+    s.bionicReading,
+    s.readingRuler,
     s.useServerCognitive,
     persist,
   ]);
@@ -39,7 +42,11 @@ export default function App() {
   const applyToPage = useCallback(async () => {
     s.setStatus("Applying…");
     const settings = getPageSettingsFromStore();
-    const r = await sendToActiveTab({ type: "APPLY_SETTINGS", settings });
+    const r = await sendToActiveTab({
+      type: "APPLY_SETTINGS",
+      settings,
+      apiBase: s.apiBase,
+    });
     s.setStatus(r.ok ? "Applied to page." : r.error ?? "Failed");
   }, [s]);
 
@@ -99,13 +106,18 @@ export default function App() {
       text: tRes.text,
       apiBase: s.apiBase,
     });
-    if (!api.ok || !api.simplified) {
-      s.setStatus(api.ok === false ? api.error : "No result");
-      return;
+    let simplified = api.ok ? api.simplified?.trim() : "";
+    let statusNote = "";
+    if (!simplified) {
+      simplified = localSimplify(tRes.text);
+      statusNote =
+        api.ok === false
+          ? ` (offline fallback: ${api.error})`
+          : " (offline fallback)";
     }
 
-    const afterScore = computeCognitiveLoad(api.simplified, dom).score;
-    s.setLastSimplified(tRes.text, api.simplified);
+    const afterScore = computeCognitiveLoad(simplified, dom).score;
+    s.setLastSimplified(tRes.text, simplified);
     s.setSimplifiedView("simplified");
     s.setCognitive(
       beforeScore,
@@ -114,10 +126,10 @@ export default function App() {
     );
     await sendToActiveTab({
       type: "SHOW_SIMPLIFIED",
-      simplified: api.simplified,
+      simplified,
       show: true,
     });
-    s.setStatus("Simplified. Toggle Original / Simplified below.");
+    s.setStatus(`Simplified. Toggle Original / Simplified below.${statusNote}`);
   }, [s]);
 
   const toggleView = useCallback(async () => {
@@ -148,11 +160,17 @@ export default function App() {
         mode,
         apiBase: s.apiBase,
       });
-      if (!api.ok || !api.summary) {
-        s.setStatus(api.ok === false ? api.error : "No summary");
+      let summary = api.ok ? api.summary?.trim() : "";
+      if (!summary) {
+        summary = localSummarize(tRes.text, mode);
+        s.setSummaryText(summary);
+        s.setStatus(
+          (mode === "tldr" ? "TL;DR (offline fallback" : "Bullets (offline fallback") +
+            (api.ok === false ? `: ${api.error})` : ").")
+        );
         return;
       }
-      s.setSummaryText(api.summary);
+      s.setSummaryText(summary);
       s.setStatus(mode === "tldr" ? "TL;DR ready." : "Bullets ready.");
     },
     [s]
@@ -271,6 +289,22 @@ export default function App() {
           onChange={(e) => s.patchPage({ focusMode: e.target.checked })}
         />
         Focus mode (spotlight main content)
+      </label>
+      <label className="chk">
+        <input
+          type="checkbox"
+          checked={s.bionicReading}
+          onChange={(e) => s.patchPage({ bionicReading: e.target.checked })}
+        />
+        Bionic Reading (bold first half of words)
+      </label>
+      <label className="chk">
+        <input
+          type="checkbox"
+          checked={s.readingRuler}
+          onChange={(e) => s.patchPage({ readingRuler: e.target.checked })}
+        />
+        Reading Ruler (highlights current line)
       </label>
 
       <div className="divider" />

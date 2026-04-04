@@ -22,7 +22,7 @@ function isVisible(el: Element): boolean {
 export function extractVisibleText(root: Document | Element = document): string {
   const parts: string[] = [];
   let count = 0;
-
+  try {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       const parent = node.parentElement;
@@ -46,6 +46,9 @@ export function extractVisibleText(root: Document | Element = document): string 
     count += t.length;
     if (count >= MAX_CHARS) break;
   }
+  } catch {
+    return "";
+  }
 
   return parts.join("\n\n").slice(0, MAX_CHARS);
 }
@@ -55,6 +58,7 @@ export function estimateMainElement(): HTMLElement | null {
   if (article) return article as HTMLElement;
   const main = document.querySelector('main, [role="main"]');
   if (main) return main as HTMLElement;
+  if (!document.body) return null;
   const bodies = Array.from(document.body.children) as HTMLElement[];
   let best: HTMLElement | null = null;
   let bestScore = 0;
@@ -70,7 +74,9 @@ export function estimateMainElement(): HTMLElement | null {
   return best;
 }
 
-export function sampleDomDepth(root: Element = document.body, maxNodes = 400): number {
+export function sampleDomDepth(root?: Element, maxNodes = 400): number {
+  const docRoot = root ?? document.body;
+  if (!docRoot) return 0;
   let maxD = 0;
   let seen = 0;
   const walk = (el: Element, d: number) => {
@@ -78,6 +84,6 @@ export function sampleDomDepth(root: Element = document.body, maxNodes = 400): n
     maxD = Math.max(maxD, d);
     for (const c of Array.from(el.children)) walk(c as Element, d + 1);
   };
-  walk(root, 0);
+  walk(docRoot, 0);
   return maxD;
 }

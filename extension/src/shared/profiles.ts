@@ -39,6 +39,8 @@ export function profileToSettings(id: ProfileId): Partial<PageSettings> {
         fontSizePx: 18,
         lineHeight: 1.65,
         letterSpacingEm: 0.02,
+        bionicReading: true,
+        readingRuler: false,
       };
     case "dyslexia":
       return {
@@ -48,6 +50,8 @@ export function profileToSettings(id: ProfileId): Partial<PageSettings> {
         fontSizePx: 20,
         lineHeight: 1.75,
         letterSpacingEm: 0.06,
+        bionicReading: false,
+        readingRuler: true,
       };
     case "autism":
       return {
@@ -58,6 +62,8 @@ export function profileToSettings(id: ProfileId): Partial<PageSettings> {
         fontSizePx: 17,
         lineHeight: 1.55,
         letterSpacingEm: 0.03,
+        bionicReading: false,
+        readingRuler: false,
       };
     default:
       return {};

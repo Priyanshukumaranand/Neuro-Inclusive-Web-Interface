@@ -1,173 +1,139 @@
 # Neuro-Inclusive Web Interface
- 
-Hackathon prototype: a Chrome Extension (Manifest V3) plus a small Node API that uses **Google Gemini** for text simplification and summarization. The extension adjusts typography, themes, distraction-heavy regions, and focus overlays for ADHD, dyslexia, and autism-friendly reading.
+
+Chrome Extension (Manifest V3) plus a small Node.js API that can use **Google Gemini** for text simplification and summarization. The extension also works **without API keys**: the server and the extension apply **local fallbacks** so demos do not break.
 
 ---
 
-## Detailed idea
+## Problem statement
 
-**Problem.** The modern web is noisy and text-heavy: dense paragraphs, flashing ads, autoplay videos, and inconsistent layout all increase cognitive load. For people with ADHD, autism, or dyslexia, this turns basic reading tasks (news, documentation, assignments) into exhausting experiences.
-
-**Idea.** Neuro-Inclusive Web Interface wraps *any* website with three capabilities:
-- **AI-assisted language accessibility**: simplify complex text into short, concrete sentences and generate TL;DR or bullet-list summaries.
-- **Visual/sensory tuning**: apply dyslexia-friendly fonts, spacing, color schemes, and a narrow “reading column” to reduce eye strain.
-- **Cognitive Load Score**: quantify before/after difficulty using interpretable heuristics (sentence length, syllables, paragraph length, UI clutter).
-
-The user chooses an accessibility profile (ADHD, Dyslexia, Autism) and the extension transforms the active page without requiring site owners to change their code.
+The web is often visually noisy and linguistically dense: ads, autoplay, long sentences, and inconsistent typography raise **cognitive load**. For many neurodivergent readers (e.g. ADHD, dyslexia, autism), that friction turns everyday reading into a draining task.
 
 ---
 
-## System design
+## Solution overview
 
-**High-level architecture**
+**Neuro-Inclusive Web Interface** layers accessibility controls onto any site the user visits:
 
-- **Chrome Extension (frontend)**
-  - `popup` (React + Zustand): user controls, profile presets, cognitive-score display, TL;DR/summary output.
-  - `content` script: extracts visible text, applies styles and focus overlays, renders the simplified-text panel on top of the page.
-  - `background` service worker: secure proxy that forwards AI requests from the extension to the backend API.
-- **Backend API (Node + Express)**
-  - `/api/simplify`: calls Gemini with a constrained “accessibility simplifier” prompt.
-  - `/api/summarize`: TL;DR and bullet summaries.
-  - `/api/cognitive-load`: optional Gemini-assisted score to blend with local heuristics.
-
-**Data flow**
-
-1. **Text simplification**
-   - Content script uses `TreeWalker` to walk visible text nodes, skipping scripts/styles/hidden elements and capping to ~12k chars.
-   - Popup asks background to call `/api/simplify` with this text.
-   - Backend prompts Gemini to keep meaning but reduce complexity and jargon.
-   - Popup receives the simplified text, computes local Cognitive Load Score (before/after), then instructs content script to show it in a floating panel.
-
-2. **Cognitive Load Score**
-   - **Text features**: average words per sentence, approximate syllables per word, paragraph lengths.
-   - **UI clutter features** (from content script): counts of images, iframes, videos, buttons, links, and a sampled DOM depth.
-   - A weighted formula combines these into a 0–100 score (higher = harder); after simplification, the same function is applied to the simplified text.
-   - Optionally, `/api/cognitive-load` asks Gemini for a subjective score, which is averaged with the heuristic score.
-
-3. **Distraction reduction and focus mode**
-   - Content script applies CSS rules (via an injected `<style>`) to blur common ad patterns and pause autoplay videos.
-   - A “focus” rectangle is drawn as a high z-index overlay with a box-shadow mask around the main content region (detected via `<article>`, `<main>`, or text-density heuristics).
-
-4. **Profiles and state**
-   - The popup stores settings in a Zustand store and syncs them into `chrome.storage.sync`.
-   - Each profile (ADHD, Dyslexia, Autism) maps to a preset bundle: theme, font size, line height, letter-spacing, readability mode, focus mode, and distraction reduction.
-   - When the user clicks **Apply to page**, the popup sends an `APPLY_SETTINGS` message to the content script, which applies CSS variables and classes on `document.documentElement`.
-
-**Scalability and extensibility**
-
-- Stateless API; any number of extension users can talk to horizontally scaled Express instances.
-- Input length caps and rate-limited UI interactions keep LLM cost and latency bounded.
-- Cognitive-load heuristics are pure TypeScript and do not depend on the model; they can be reused with other providers (or in offline modes).
-
-**Security:** `GEMINI_API_KEY` stays on the server only. The extension talks to your API over HTTP(S).
+- **Reading adjustments**: themes, font size, spacing, optional narrow column, bionic-style emphasis, reading ruler.
+- **Focus and calm**: heuristic distraction reduction (blur common ad patterns, dim autoplay video) and a spotlight-style **focus mode** on the detected main content.
+- **Language support**: simplify page text and show it in an on-page panel; TL;DR and bullet summaries in the popup. **Gemini runs only on the server** (keys are not embedded in the extension).
+- **Cognitive load score**: heuristic 0–100 score from text and simple DOM signals, with an optional blend from the server when enabled.
 
 ---
 
-## Project structure
+## Features
 
+| Area | What it does |
+|------|----------------|
+| **Content extraction** | Visible text via `TreeWalker`, capped length, skips scripts/styles and hidden nodes. |
+| **Popup UI** | React + Zustand: profiles, visuals, actions, API base URL, status line. |
+| **Profiles** | **ADHD**, **Dyslexia**, **Autism**, **Default** — preset bundles of the toggles above. |
+| **Readability** | Font size, line height, letter spacing, themes (default, dark, sepia, dyslexia, autism). |
+| **Distraction reduction** | CSS heuristics for common ad iframes/classes; autoplay videos toned down. |
+| **Focus mode** | Dimmed overlay with a “hole” over estimated main content (`article` / `main` / density heuristic). |
+| **Simplify / summarize** | Calls `/api/simplify` and `/api/summarize`; **offline fallbacks** in the extension if the server is unreachable or returns an error. |
+| **Explain selection** | Select short text on the page → **Explain** uses `/api/define` when the server is up; otherwise a short offline message. |
+| **Cognitive load** | Computed in the popup; optional server blend via **Blend Gemini cognitive score**. |
+
+---
+
+## Tech stack
+
+- **Extension**: TypeScript, React 18, Zustand, Vite 5, Chrome MV3 (`service_worker`, `content_scripts`).
+- **Server**: Node.js, Express, `@google/generative-ai` (when `GEMINI_API_KEY` is set).
+- **Repo**: npm **workspaces** (`server`, `extension`).
+
+---
+
+## Architecture (high level)
+
+```mermaid
+flowchart LR
+  subgraph ext [Chrome Extension]
+    popup[Popup React]
+    bg[Service worker]
+    cs[Content script]
+  end
+  subgraph api [Node API]
+    ex[Express routes]
+    gem[Gemini optional]
+  end
+  popup --> bg
+  popup --> cs
+  bg --> ex
+  ex --> gem
 ```
-neuro-inclusive-web/
-├── package.json                 # npm workspaces
-├── README.md
-├── docs/
-│   ├── evaluation/
-│   │   ├── EVALUATION.md
-│   │   ├── synthetic-suite.json
-│   │   └── latest-results.json  # generated by `npm run eval`
-│   └── submission/
-│       ├── 4-page-summary-template.md
-│       └── SUBMISSION_CHECKLIST.md
-├── scripts/
-│   └── evaluate.mjs
-├── server/
-│   ├── package.json
-│   ├── .env.example
-│   └── src/
-│       ├── index.ts
-│       ├── lib/
-│       │   ├── gemini.ts
-│       │   └── prompts.ts
-│       └── routes/
-│           ├── simplify.ts
-│           ├── summarize.ts
-│           └── cognitiveLoad.ts
-└── extension/
-    ├── package.json
-    ├── vite.config.ts
-    ├── manifest.json
-    ├── popup.html
-    └── src/
-        ├── background/index.ts
-        ├── content/
-        │   ├── index.ts
-        │   ├── extract.ts
-        │   └── stylesInjected.ts
-        ├── popup/
-        │   ├── App.tsx
-        │   ├── main.tsx
-        │   ├── store.ts
-        │   ├── tab.ts
-        │   └── index.css
-        └── shared/
-            ├── messages.ts
-            ├── profiles.ts
-            └── cognitiveLoad.ts
-```
+
+- **Popup** talks to the **service worker** for HTTP to your API and to the **content script** via `chrome.tabs.sendMessage`.
+- **Content script** reads the DOM, injects theme/distraction CSS, shows the simplified panel, and handles selection → explain.
+- **Server** holds the Gemini key; routes return JSON. Without a key, routes still respond using **local mock simplification / summaries / definitions** and heuristic cognitive scores.
+
+---
+
+## How it works (simple flow)
+
+1. User opens the popup on a normal webpage and sets **API** URL (default `http://localhost:3000`).
+2. **Apply to page** sends settings to the content script, which sets `data-*` / classes on `<html>` and injects CSS.
+3. **Score cognitive load** pulls extracted text + DOM stats from the content script and runs the heuristic scorer (optionally blended with the server).
+4. **Simplify page** fetches text → background POSTs to `/api/simplify` → popup stores before/after scores and tells the content script to show the **floating panel**. If the call fails, the **same heuristics as the server fallback** run inside the extension.
+5. **TL;DR / Bullet summary** POSTs to `/api/summarize` with the same offline extension fallback if needed.
 
 ---
 
 ## Prerequisites
 
-- Node.js 18+ and npm
-- Google AI Studio API key for Gemini ([https://aistudio.google.com/apikey](https://aistudio.google.com/apikey))
-- Google Chrome (for loading the unpacked extension)
+- **Node.js** 18+ and npm  
+- **Google Chrome** (load unpacked extension)  
+- **Optional**: Google AI Studio API key for real Gemini responses — [Get an API key](https://aistudio.google.com/apikey)
 
 ---
 
-## Step-by-step setup
+## Installation
 
-1. **Clone or copy** this folder and open a terminal at `neuro-inclusive-web/`.
+From the repo root:
 
-2. **Install dependencies**
+```bash
+npm install
+```
 
-   ```bash
-   npm install
-   ```
+### Server env (optional Gemini)
 
-3. **Configure the API server**
+```bash
+cd server
+```
 
-   ```bash
-   cd server
-   ```
+Copy `server/.env.example` to `server/.env` and set:
 
-   Copy the env file: on Windows `copy .env.example .env`, on macOS/Linux `cp .env.example .env`.
+- `GEMINI_API_KEY` — optional; omit to use server-side mock responses  
+- `GEMINI_MODEL` — optional (see `.env.example`)  
+- `PORT` — optional (default `3000`)
 
-   Edit `server/.env` and set:
+### Build the extension
 
-   - `GEMINI_API_KEY` — your key  
-   - `GEMINI_MODEL` — optional (default `gemini-2.0-flash`)  
-   - `PORT` — optional (default `3000`)
+```bash
+cd extension
+npm run build
+```
 
-4. **Build the extension**
+Load **`extension/dist`** in Chrome (see below). For iterative work:
 
-   ```bash
-   cd ../extension
-   npm run build
-   ```
+```bash
+npm run dev
+```
 
-   Output loads from `extension/dist/`.
-
-5. **Load the extension in Chrome**
-
-   - Open `chrome://extensions`
-   - Enable **Developer mode**
-   - **Load unpacked** → select `extension/dist`
-
-6. **Set the API URL in the popup** (defaults to `http://localhost:3000`).
+Rebuild updates `dist/`; click **Reload** on `chrome://extensions`.
 
 ---
 
-## How to run locally
+## Load the extension in Chrome
+
+1. Open `chrome://extensions`
+2. Turn on **Developer mode**
+3. **Load unpacked** → choose the folder **`extension/dist`** (the built output, not the repo root)
+
+---
+
+## Run locally
 
 **Terminal 1 — API**
 
@@ -176,75 +142,41 @@ cd server
 npm run dev
 ```
 
-Check [http://localhost:3000/health](http://localhost:3000/health) — `gemini: true` when the key is set.
+Health check: [http://localhost:3000/health](http://localhost:3000/health) — `gemini: true` only when a key is configured.
 
-**Terminal 2 — Extension (watch rebuild)**
+**Terminal 2 — Extension watch (optional)**
 
 ```bash
 cd extension
 npm run dev
 ```
 
-After changes, click **Reload** on the extension card in `chrome://extensions`.
+After each change, reload the extension in Chrome.
 
 ---
 
-## Evaluation and testing (rubric-focused)
+## How to test features
 
-Run the synthetic benchmark to produce objective quality metrics:
+Use a **long article** (news or blog), not `chrome://` or the Chrome Web Store (those pages do not run normal content scripts).
 
-```bash
-npm run eval
-```
+1. **Popup opens** — click the extension icon.  
+2. **Apply to page** — typography/theme should change on the tab.  
+3. **Profiles** — try **Dyslexia** / **ADHD** / **Autism**, then **Apply to page**.  
+4. **Distraction reduction** — enable and apply; ad-like regions may blur (heuristic).  
+5. **Focus mode** — spotlight around main content.  
+6. **Score cognitive load** — **Before** pill updates; enable **Blend Gemini…** only if the server and key are available.  
+7. **Simplify page** — panel appears bottom-right; **Toggle** switches original vs simplified text.  
+8. **TL;DR / Bullets** — text appears under **Summary**.  
+9. **Explain** — select a short phrase; **Explain** button should appear (mouseup with valid selection).
 
-This generates `docs/evaluation/latest-results.json` with:
-- complexity delta (%),
-- average words-per-sentence delta (%),
-- improvement rate across synthetic cases,
-- per-case previews for quick error analysis.
-
-Evaluation docs:
-- `docs/evaluation/EVALUATION.md`
-- `docs/evaluation/synthetic-suite.json`
+**Without the server running**, simplify/summary still produce **offline heuristic** output; status text mentions a fallback.
 
 ---
 
-## Architecture and scalability notes
+## AI usage
 
-- **Algorithms/data structures**
-  - `TreeWalker` for text extraction over visible nodes (linear traversal).
-  - Heuristic clutter model from DOM counts and depth sampling.
-  - Weighted cognitive-load function combining text and UI signals.
-- **Scalability controls**
-  - Request input capped to ~12k chars to control latency and token cost.
-  - Stateless backend endpoints for easy horizontal scaling.
-  - Extension-side settings persisted in `chrome.storage.sync`.
-- **Reliability controls**
-  - Prompt constraints preserve semantic meaning and avoid new facts.
-  - Optional human verification for high-stakes content.
-
----
-
-## How to demo (about 2–3 minutes)
-
-1. Open a busy article or news site.
-2. Open the extension popup. Click **Score cognitive load** — note the **Before** pill and clutter-related factors.
-3. Choose a **Profile** (e.g. **Autism** or **ADHD**), adjust **Visual** options, enable **Distraction reduction** / **Focus mode**, then **Apply to page**.
-4. Click **Simplify page (AI)** — when the API returns, check **Before / After** cognitive scores and use **Toggle** to compare original vs simplified text in the on-page panel.
-5. Click **TL;DR** or **Bullet summary** — summaries appear in the popup.
-6. Mention that **API keys never ship in the extension** — only the backend calls Gemini.
-
----
-
-## Hackathon submission collateral
-
-- 4-page summary template: `docs/submission/4-page-summary-template.md`
-- Final submission checklist: `docs/submission/SUBMISSION_CHECKLIST.md`
-
-To create the final PDF:
-1. Fill participant and GitHub details in the template.
-2. Export Markdown to PDF (VS Code print, Typora, or Pandoc).
-3. Keep within 4 pages and include public repository URL.
+- **With `GEMINI_API_KEY`**: `/api/simplify`, `/api/summarize`, `/api/cognitive-load`, and `/api/define` call Gemini with constrained prompts.  
+- **Without a key (or on Gemini errors)**: the **server** returns mock simplifications, summaries, definitions, and heuristic cognitive scores. The **extension** duplicates simplify/summary fallbacks if the network or server fails so the UI never hard-fails for demos.
 
 ---
 
@@ -256,29 +188,38 @@ To create the final PDF:
 | `POST` | `/api/simplify` | `{ "text": "..." }` |
 | `POST` | `/api/summarize` | `{ "text": "...", "mode": "tldr" \| "bullets" }` |
 | `POST` | `/api/cognitive-load` | `{ "text": "...", "domStats": { ... } }` |
-
----
-
-## Cognitive Load Score (client)
-
-The popup computes a **0–100** score (higher = more load) from sentence length, syllable-ish heuristics, paragraph size, and optional DOM clutter counts from the content script. Optional **Blend Gemini cognitive score** averages that with the server’s `/api/cognitive-load` result for demos.
+| `POST` | `/api/define` | `{ "text": "..." }` |
 
 ---
 
 ## Limitations (hackathon scope)
 
-- Ad/distraction hiding uses heuristics, not full ad-blocker rules.
-- Simplified text is shown in a **floating panel** to avoid breaking page layout.
-- Some SPAs or shadow-DOM-heavy sites may return partial text — refresh or pick a static article for best results.
+- Distraction hiding is **pattern-based**, not a full ad blocker.  
+- Simplified text is shown in a **floating panel** so page layout is not rewritten.  
+- Heavy **SPAs** or **shadow DOM** may yield partial text; static articles demo best.  
+- **OpenDyslexic** is referenced in CSS; install the font locally for the intended look, or the stack falls back to **Comic Sans MS** / system UI.
+
+---
+
+## Future improvements
+
+- Smarter main-content detection and optional “reader mode” DOM isolation.  
+- User-tunable distraction selectors and per-site memory.  
+- Stronger offline / privacy mode without any network.  
+- Automated tests for the extension messaging layer.
+
+---
+
+## Evaluation (optional)
+
+```bash
+npm run eval
+```
+
+Writes metrics to `docs/evaluation/latest-results.json`. See `docs/evaluation/EVALUATION.md` if present.
 
 ---
 
 ## License
 
 MIT (hackathon / educational use).
-#   N e u r o - I n c l u s i v e - W e b - I n t e r f a c e  
- #   N e u r o - I n c l u s i v e - W e b - I n t e r f a c e  
- #   N e u r o - I n c l u s i v e - W e b - I n t e r f a c e  
- #   N e u r o - I n c l u s i v e - W e b - I n t e r f a c e  
- #   N e u r o - I n c l u s i v e - W e b - I n t e r f a c e  
- 

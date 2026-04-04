@@ -16,6 +16,8 @@ export type AppState = {
   readabilityMode: boolean;
   distractionReduction: boolean;
   focusMode: boolean;
+  bionicReading: boolean;
+  readingRuler: boolean;
   simplifiedView: "original" | "simplified";
   lastSimplified: string;
   lastOriginalSample: string;
@@ -49,6 +51,8 @@ const defaultSettings: Pick<
   | "readabilityMode"
   | "distractionReduction"
   | "focusMode"
+  | "bionicReading"
+  | "readingRuler"
   | "simplifiedView"
   | "lastSimplified"
   | "lastOriginalSample"
@@ -67,6 +71,8 @@ const defaultSettings: Pick<
   readabilityMode: false,
   distractionReduction: false,
   focusMode: false,
+  bionicReading: false,
+  readingRuler: false,
   simplifiedView: "simplified",
   lastSimplified: "",
   lastOriginalSample: "",
@@ -86,6 +92,8 @@ function toPageSettings(s: AppState): PageSettings {
     readabilityMode: s.readabilityMode,
     distractionReduction: s.distractionReduction,
     focusMode: s.focusMode,
+    bionicReading: s.bionicReading,
+    readingRuler: s.readingRuler,
   };
 }
 
@@ -128,6 +136,8 @@ export const useStore = create<AppState>((set, get) => ({
       readabilityMode,
       distractionReduction,
       focusMode,
+      bionicReading,
+      readingRuler,
       useServerCognitive,
     } = get();
     await chrome.storage.sync.set({
@@ -141,6 +151,8 @@ export const useStore = create<AppState>((set, get) => ({
         readabilityMode,
         distractionReduction,
         focusMode,
+        bionicReading,
+        readingRuler,
         useServerCognitive,
       },
     });

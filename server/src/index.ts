@@ -4,6 +4,7 @@ import cors from "cors";
 import simplifyRouter from "./routes/simplify.js";
 import summarizeRouter from "./routes/summarize.js";
 import cognitiveLoadRouter from "./routes/cognitiveLoad.js";
+import defineRouter from "./routes/define.js";
 import { isGeminiConfigured } from "./lib/gemini.js";
 
 const app = express();
@@ -29,10 +30,13 @@ app.get("/health", (_req, res) => {
 app.use("/api/simplify", simplifyRouter);
 app.use("/api/summarize", summarizeRouter);
 app.use("/api/cognitive-load", cognitiveLoadRouter);
+app.use("/api/define", defineRouter);
 
 app.listen(PORT, () => {
   console.log(`Neuro-Inclusive API listening on http://localhost:${PORT}`);
   if (!isGeminiConfigured()) {
-    console.warn("Warning: GEMINI_API_KEY not set — AI routes will fail.");
+    console.warn(
+      "Note: GEMINI_API_KEY not set — /api/simplify, /summarize, /define use local fallbacks; cognitive-load uses heuristics."
+    );
   }
 });

@@ -75,6 +75,22 @@ async function handle(message: BackgroundRequest): Promise<BackgroundResponse> {
         reason: data.reason,
       };
     }
+    if (message.type === "API_DEFINE") {
+      const res = await fetch(`${base}/api/define`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: message.text }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return {
+          ok: false,
+          error: (err as { error?: string }).error ?? res.statusText,
+        };
+      }
+      const data = (await res.json()) as { definition?: string };
+      return { ok: true, definition: data.definition ?? "" };
+    }
   } catch (e) {
     return {
       ok: false,
