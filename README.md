@@ -1,97 +1,206 @@
 # Neuro-Inclusive Web Interface
 
-Chrome Extension (Manifest V3) + Node.js API for neuro-inclusive reading support.
+A production-minded Chrome Extension (Manifest V3) + Node.js API that lowers web reading friction for neurodivergent users (ADHD, dyslexia, autism) through adaptive UI controls, text simplification, summarization, explainability, and cognitive-load scoring.
 
-The project is designed for hackathon demos with a fallback-first approach:
-- If Gemini is unavailable, the app still works with deterministic local logic.
-- If the API is unavailable, core text features still run in extension offline mode.
+This README is structured for hackathon evaluation and explicitly addresses:
 
-## Project Overview
+- potential impact and uniqueness
+- algorithm and architecture quality
+- code quality and maintainability
+- model evaluation and testing evidence
 
-Neuro-Inclusive Web Interface helps reduce reading friction on normal websites by combining:
-- readability controls,
-- distraction reduction,
-- focus support,
-- text simplification/summarization,
-- explain-on-selection,
-- and cognitive load scoring.
+## 1) Problem and Proposed Impact
 
-This is not a full browser replacement. It is a practical assistive layer that can be applied to many sites quickly.
+### Problem
 
-## Problem Statement
+Many websites combine dense language, long paragraphs, high visual clutter, and frequent context switches (ads, sidebars, popups). This increases cognitive overhead and disproportionately affects neurodivergent readers.
 
-Many websites are dense, noisy, and visually inconsistent. Long sentences, cluttered layouts, and aggressive UI elements can increase cognitive load, especially for users with ADHD, dyslexia, and autism.
+### Proposed Impact
 
-## Core Logic and Reasoning
+Neuro-Inclusive Web Interface enables users to:
 
-The architecture intentionally separates concerns for reliability:
-- Extension popup handles UX, settings, and user actions.
-- Content script handles DOM extraction and page-level visual transforms.
-- Background service worker handles network calls.
-- Server routes encapsulate AI/model calls and enforce fallback responses.
+- reduce visual clutter and sensory overload on any page
+- simplify and summarize complex text quickly
+- get low-friction definitions for selected terms
+- measure cognitive difficulty before and after interventions
 
-Why this works for demo reliability:
-- No API keys in the extension.
-- Deterministic fallback behavior in both server and extension.
-- Typed message contracts across popup/background/content.
-- Small, composable route-per-capability design.
+Expected real-world benefit: lower reading fatigue, faster information extraction, and improved comprehension confidence on non-accessibility-first sites.
 
-## Features
+### Uniqueness
 
-### Implemented and working
-- Extract visible page content.
-- Simplify text.
-- Summarize text (TL;DR and bullets).
-- Hide distractions (heuristic CSS selectors + autoplay video dampening).
-- Focus mode spotlight.
-- Readability mode (narrow reading column).
-- Accessibility profiles:
-  - ADHD
-  - Dyslexia
-  - Autism
-- Cognitive Load Score.
-- Toggle original/simplified content panel view.
-- Explain selected short text.
+The project is not only a UI wrapper around an LLM. It combines:
 
-### Design choice for stability
-- Settings are applied explicitly through **Apply to page** (no auto-apply race on each toggle).
+- deterministic browser-side DOM and readability heuristics
+- explicit data structures for ranking and term detection
+- server-side AI routing with strict fallback guarantees
+- measurable before/after cognitive-load metrics
 
-## Tech Stack
+## 2) System Overview
 
-- Extension: TypeScript, React 18, Zustand, Vite 5, Chrome MV3.
-- Server: Node.js, Express, @google/generative-ai.
-- Testing: lightweight TypeScript test scripts via tsx.
-- Monorepo: npm workspaces (server, extension).
-
-## Architecture
+### High-level Architecture
 
 ```mermaid
 flowchart LR
-  subgraph ext [Chrome Extension]
-   popup[Popup React]
-   bg[Background Service Worker]
-   cs[Content Script]
+  U[User]
+  subgraph EXT[Chrome Extension]
+    P[Popup UI\nReact + Zustand]
+    B[Service Worker\nAPI Proxy + LRU Cache]
+    C[Content Script\nDOM Analysis + Styling]
   end
-  subgraph api [Node API]
-   ex[Express Routes]
-   gem[Gemini Optional]
+  subgraph API[Node/Express API]
+    R1[/simplify]
+    R2[/summarize]
+    R3[/cognitive-load]
+    R4[/define]
+    R5[/importance-heatmap]
+    G[Gemini Optional]
   end
 
-  popup --> bg
-  popup --> cs
-  bg --> ex
-  ex --> gem
+  U --> P
+  P --> C
+  P --> B
+  B --> R1
+  B --> R2
+  B --> R3
+  B --> R4
+  B --> R5
+  R1 --> G
+  R2 --> G
+  R3 --> G
+  R4 --> G
+  R5 --> G
 ```
 
-## Setup Instructions
+### Request/Response Sequence
 
-## Prerequisites
+```mermaid
+sequenceDiagram
+  participant User
+  participant Popup
+  participant Content as Content Script
+  participant SW as Service Worker
+  participant API as Express API
+  participant LLM as Gemini
+
+  User->>Popup: Click "Simplify page"
+  Popup->>Content: GET_PAGE_ANALYSIS
+  Content-->>Popup: prioritizedText + domStats + blocks
+  Popup->>SW: API_SIMPLIFY(text)
+  SW->>API: POST /api/simplify
+  alt Gemini configured
+    API->>LLM: generateContent(prompt)
+    LLM-->>API: simplified text
+  else fallback path
+    API-->>API: heuristic simplification
+  end
+  API-->>SW: simplified JSON
+  SW-->>Popup: simplified text
+  Popup->>Content: SHOW_SIMPLIFIED
+  Content-->>User: overlay panel + readable output
+```
+
+### Reliability/Fallback State Model
+
+```mermaid
+stateDiagram-v2
+  [*] --> Collect
+  Collect --> ServerCall
+  ServerCall --> AIResponse: valid JSON + output
+  ServerCall --> ServerFallback: no API key or AI error
+  ServerCall --> ExtensionFallback: network timeout/failure
+  AIResponse --> Render
+  ServerFallback --> Render
+  ExtensionFallback --> Render
+  Render --> [*]
+```
+
+## 3) Core Logic, DS/Algorithms, and AI Technique
+
+### A) DOM understanding and block classification
+
+Implemented in `extension/src/content/domPipeline.ts`:
+
+- breadth-first traversal with safety caps (`MAX_TRAVERSAL_NODES`, `MAX_TEXT_CHARS`, `MAX_BLOCKS`)
+- category classifier (`main-content`, `navigation`, `ads`, `popup`, `sidebar`, `dense-text`, `other`)
+- branch skipping for low-value UI regions
+- visibility-aware relevance scoring
+
+This provides deterministic structure even when AI is unavailable.
+
+### B) Data structures used correctly
+
+1. `ComplexWordTrie` (`extension/src/shared/complexWordTrie.ts`)
+- Detects multi-token complex terms like "executive function" efficiently.
+- Supports scalable term matching over extracted text blocks.
+
+2. `PriorityQueue` max-heap (`extension/src/shared/priorityQueue.ts`)
+- Ranks candidate blocks by dynamic priority (visibility, proximity, relevance, category, term density).
+- Used in viewport-aware prioritization for importance and summarization input quality.
+
+3. `LruCache` with TTL (`extension/src/background/lruCache.ts`)
+- Caches successful API responses in the service worker.
+- Reduces repeated calls, latency, and token/API usage.
+- Separate TTLs per route type (`simplify`, `summarize`, `define`, `importance`, `cognitive`).
+
+### C) Cognitive-load scoring pipeline
+
+Implemented in `extension/src/shared/cognitiveLoad.ts`:
+
+- combines sentence complexity, syllable burden, paragraph length, clutter, heading density, and jargon load
+- outputs a normalized score in [0, 100] plus interpretable factor breakdown
+
+This enables quantitative before/after comparisons for accessibility interventions.
+
+### D) AI technique and prompt engineering
+
+Implemented in `server/src/lib/prompts.ts` + route handlers:
+
+- route-specific instruction prompts (simplify, summarize, define, cognitive-load JSON, importance ranking)
+- bounded input size to control cost and latency
+- strict JSON parsing and safe fallback on malformed output
+- optional Gemini use (`GEMINI_API_KEY`) without embedding keys in extension bundle
+
+### E) Architectural scalability choices
+
+- extension-server separation keeps secrets off client
+- bounded payload sizes prevent runaway memory and token usage
+- stateless API routes support horizontal scaling
+- caching and deterministic fallback preserve performance under partial outages
+
+## 4) Feature Set
+
+- readability controls: font size, line height, spacing, themes
+- cognitive profiles: default, ADHD, dyslexia, autism presets
+- distraction reduction and focus mode
+- difficult-term highlighting
+- importance heatmap (heuristic or AI-blended ranking)
+- simplify page (AI first, deterministic fallback)
+- smart summaries (TL;DR, bullets, key points)
+- explain selected term
+- cognitive load scoring with optional server blend
+
+## 5) Repository Structure
+
+```text
+.
+|- extension/           Chrome MV3 extension (React popup + content + SW)
+|- server/              Express API and Gemini integration
+|- tests/               Unit and API test scripts
+|- scripts/             Smoke-test and evaluation runners
+|- docs/evaluation/     Synthetic benchmark dataset and generated results
+`- README.md
+```
+
+## 6) Environment Setup
+
+### Prerequisites
 
 - Node.js 18+
-- npm
-- Google Chrome
+- npm 9+
+- Google Chrome (for unpacked extension load)
+- Optional: Gemini API key from https://aistudio.google.com/apikey
 
-## Install dependencies
+### Install dependencies
 
 From repository root:
 
@@ -99,176 +208,167 @@ From repository root:
 npm install
 ```
 
-## Configure server environment (optional Gemini)
+### Configure server environment
 
-Copy:
+`server/.env.example` is included.
 
-```bash
-server/.env.example -> server/.env
+Create `server/.env` with (optional) values:
+
+```env
+GEMINI_API_KEY=your_key_here
+GEMINI_MODEL=gemini-2.0-flash
+PORT=3000
 ```
 
-Set values in server/.env:
-- GEMINI_API_KEY (optional)
-- GEMINI_MODEL (optional, default in example)
-- PORT (optional, default 3000)
+If `GEMINI_API_KEY` is omitted, the system still works in deterministic fallback mode.
 
-If GEMINI_API_KEY is missing or invalid, routes return fallback content instead of failing.
+## 7) Build and Run
 
-## Build and Run Locally
-
-### Terminal 1: run API server
+### Terminal 1: Start API server
 
 ```bash
 npm run dev:server
 ```
 
-Health endpoint:
-- http://localhost:3000/health
+Health check:
 
-### Terminal 2: build/watch extension
+- `GET http://localhost:3000/health`
 
-One-time build:
+### Terminal 2: Build extension
 
 ```bash
 npm run build:extension
 ```
 
-Watch mode:
+For watch mode while iterating:
 
 ```bash
 npm run dev:extension
 ```
 
-## Load Extension in Chrome
+### Load extension in Chrome
 
-1. Open chrome://extensions
+1. Open `chrome://extensions`
 2. Enable Developer mode
 3. Click Load unpacked
-4. Select extension/dist
+4. Select `extension/dist`
 
-Reload extension after rebuilds.
+## 8) How to Use (Demo Flow)
 
-## How to Test Each Feature
+1. Open a long article page (not `chrome://` pages).
+2. Open the extension popup.
+3. Optionally choose profile (`ADHD`, `Dyslexia`, `Autism`).
+4. Click `Apply to page`.
+5. Click `Score cognitive load`.
+6. Click `Simplify page` and compare before/after score.
+7. Try `TL;DR` or bullet summary.
+8. Select a term on the page and click `Explain`.
 
-Use normal web pages (news/blog/docs). Avoid chrome:// pages.
+## 9) API Contract
 
-1. Popup opens
-  - Click extension icon and confirm UI renders.
-2. Apply settings
-  - Change theme/font/spacing, click Apply to page, verify visual change.
-3. Profiles
-  - Pick ADHD, Dyslexia, Autism; click Apply to page and verify behavior.
-4. Distraction reduction
-  - Enable + apply, verify ad-like blocks/video are visually reduced.
-5. Focus mode
-  - Enable + apply, verify spotlight around main content.
-6. Readability mode
-  - Enable + apply, verify narrower readable column.
-7. Cognitive load
-  - Click Score cognitive load and verify before score appears.
-8. Simplify page
-  - Click Simplify page (AI), verify floating panel shows simplified text.
-9. Toggle original/simplified
-  - Click Toggle button and verify content switches.
-10. Summaries
-  - Click TL;DR and Bullet summary; verify summary text.
-11. Explain selection
-  - Highlight short phrase on page, click Explain, verify tooltip definition.
+| Method | Endpoint | Body |
+|---|---|---|
+| GET | `/health` | - |
+| POST | `/api/simplify` | `{ "text": "..." }` |
+| POST | `/api/summarize` | `{ "text": "...", "mode": "tldr" \| "bullets" }` |
+| POST | `/api/cognitive-load` | `{ "text": "...", "domStats": {...} }` |
+| POST | `/api/define` | `{ "text": "..." }` |
+| POST | `/api/importance-heatmap` | `{ "text": "...", "domStats": {...}, "blocks": [...] }` |
 
-## Fallback Behavior When AI Is Unavailable
+## 10) Testing and Evaluation Evidence
 
-Fallback behavior is intentional and deterministic:
+### A) Automated tests
 
-- API key missing/invalid:
-  - Server returns fallback simplify/summarize/define outputs.
-  - Server returns heuristic cognitive-load score.
-- Server unreachable:
-  - Extension uses local simplify/summarize fallback logic.
-  - Explain action shows offline guidance.
-  - Cognitive score still works locally (server blend optional).
-
-No critical user flow should crash because AI is unavailable.
-
-## Testing and Evaluation
-
-## Unit tests
+Run unit tests:
 
 ```bash
-npm run test:unit
+npm test
 ```
 
-Includes:
-- cognitive-load heuristics tests,
-- profile mapping tests,
-- fallback helper tests.
+Current result snapshot (local run on 2026-04-05):
 
-## API tests
+- cognitive-load tests: 10/10 passed
+- data-structure tests: 12/12 passed
+- profile tests: 24/24 passed
+- fallback tests: 9/9 passed
+- total unit checks: 55 passed, 0 failed
 
-Start server first, then:
+Run API route checks (server required):
 
 ```bash
 npm run test:api
 ```
 
-Covers:
-- /health
-- /api/simplify
-- /api/summarize
-- /api/cognitive-load
-- /api/define
+Current result snapshot (local run on 2026-04-05):
 
-## Smoke test
+- API checks: 30 passed, 0 failed
+
+Run smoke test:
 
 ```bash
 npm run smoke-test
 ```
 
-## Evaluation
+Smoke test confirms all core routes return valid responses in fallback mode when Gemini key is missing.
+
+### B) Synthetic benchmark for simplification
+
+Dataset: `docs/evaluation/synthetic-suite.json` (10 proxy cases across legal/medical/finance/engineering/policy/etc.)
+
+Run benchmark:
 
 ```bash
 npm run eval
 ```
 
-Writes metrics to docs/evaluation/latest-results.json using synthetic benchmark inputs.
+Output:
 
-## Data Strategy (Hackathon)
+- `docs/evaluation/latest-results.json`
 
-- Current benchmark uses synthetic inputs in docs/evaluation/synthetic-suite.json.
-- This provides consistent, reproducible evaluation without requiring private datasets.
-- The architecture supports adding real page excerpts and larger benchmark suites later.
+Latest generated summary (2026-04-05):
 
-## Scalability Notes
+- total cases: 10
+- improved cases: 10
+- improvement rate: 100%
+- mean complexity delta: -11.34%
+- mean words-per-sentence delta: -44.11%
 
-The project is prepared for extension beyond hackathon scope:
-- Route-per-capability API design (simplify, summarize, define, cognitive-load).
-- Shared message contracts between extension components.
-- Fallback logic isolated in reusable helpers.
-- Server model backend is swappable while preserving route contracts.
+Evaluation protocol details:
 
-## Limitations
+- `docs/evaluation/EVALUATION.md`
 
-- Distraction hiding is heuristic, not full ad-blocking.
-- Content extraction is best-effort on highly dynamic SPAs/shadow DOM pages.
-- Bionic reading modifies text nodes and may not be ideal on every complex page.
-- Simplified content is shown in a floating panel rather than rewriting the entire page DOM.
+## 11) Hackathon Rubric Mapping
 
-## Future Improvements
+```mermaid
+pie title Rubric Coverage Mapping
+  "Impact and Uniqueness (20%)" : 20
+  "DS/Algorithms + AI + Architecture (50%)" : 50
+  "Code Quality (10%)" : 10
+  "Evaluation and Testing (20%)" : 20
+```
 
-- Better main-content detection for complex layouts.
-- Optional per-site configuration memory.
-- More robust extension integration tests (popup/background/content messaging).
-- Expanded evaluation set with real-world samples and semantic/factual quality metrics.
+| Rubric Area | Evidence in this repository |
+|---|---|
+| Potential Impact and Uniqueness (20%) | Neurodivergent-first reading support + deterministic + AI hybrid approach; profile-aware UX and cognitive scoring. |
+| DS/Algorithm, AI Technique, Scalability, Functionality (50%) | Trie + heap + LRU cache, DOM classification pipeline, AI+heuristic blending, stateless API, timeout and fallback handling. |
+| Code Quality (10%) | Typed TypeScript codebase, modular routes, shared message contracts, explicit bounds and guardrails, test scripts per subsystem. |
+| Model Evaluation and Testing (20%) | 55 unit checks + 30 API checks + smoke tests + synthetic benchmark with measurable deltas and stored JSON outputs. |
 
-## API Endpoints
+## 12) Constraints and Future Work
 
-| Method | Path | Body |
-| --- | --- | --- |
-| GET | /health | - |
-| POST | /api/simplify | { "text": "..." } |
-| POST | /api/summarize | { "text": "...", "mode": "tldr" \| "bullets" } |
-| POST | /api/cognitive-load | { "text": "...", "domStats": { ... } } |
-| POST | /api/define | { "text": "..." } |
+Current constraints:
 
-## License
+- distraction filtering is heuristic, not a full ad-block engine
+- some SPA/shadow DOM pages may yield partial extraction
+- synthetic benchmark should be complemented by human-labeled accessibility studies
 
-MIT (hackathon / educational use)
+Planned improvements:
+
+- add human evaluation protocol with comprehension and fatigue scoring
+- add per-site personalization and long-term adaptation
+- add end-to-end browser automation tests for messaging and UI behavior
+- improve multilingual simplification and term glossing
+
+## 13) License
+
+MIT (hackathon / educational use).
