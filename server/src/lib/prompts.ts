@@ -40,3 +40,28 @@ Base your score on sentence complexity, jargon, and density of ideas.`;
 export function cognitiveLoadUser(text: string, domHint: string): string {
   return `Text sample:\n${text.slice(0, 8000)}\n\nDOM/UI hint (counts): ${domHint}`;
 }
+
+export const importanceHeatmapSystem = `You rank which page blocks are most important for a reader.
+Return exactly one JSON object (no markdown) with keys:
+- "importance": array of objects {"id": string, "score": number 0-100}
+- "reason": one short sentence
+Scoring goals:
+- Prioritize core instructional or explanatory content
+- Penalize navigation, ads, repetitive UI chrome, and low-information blocks
+- Prefer blocks with clear ideas, context, and relevance to the page topic
+- Keep IDs exactly as provided`;
+
+export function importanceHeatmapUser(
+  text: string,
+  domHint: string,
+  blockPayloadJson: string
+): string {
+  return [
+    `Page text sample:\n${text.slice(0, 6000)}`,
+    "",
+    `DOM/UI hint: ${domHint}`,
+    "",
+    "Candidate blocks JSON:",
+    blockPayloadJson,
+  ].join("\n");
+}

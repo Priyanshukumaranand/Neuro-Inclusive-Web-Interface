@@ -25,7 +25,7 @@ async function run() {
   // Health
   {
     const r = await fetch(`${API}/health`);
-    const d = await r.json();
+    const d = (await r.json()) as { ok?: boolean; gemini?: boolean };
     assert(r.ok, "GET /health → 200");
     assert(d.ok === true, "/health → ok: true");
     assert(typeof d.gemini === "boolean", "/health → gemini is boolean");
@@ -123,6 +123,74 @@ async function run() {
     assert(typeof d.score === "number", "Response has numeric score");
     assert(d.score! >= 0 && d.score! <= 100, "Score in [0, 100]");
     assert(typeof d.reason === "string", "Response has reason string");
+  }
+
+  // Importance heatmap: missing text → 400
+  {
+    const r = await fetch(`${API}/api/importance-heatmap`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        blocks: [
+          {
+            id: "b-1",
+            text: "Some text",
+            category: "main-content",
+            relevance: 80,
+            visibility: 0.9,
+            difficultTermsCount: 1,
+          },
+        ],
+      }),
+    });
+    assert(r.status === 400, "POST /api/importance-heatmap missing text → 400");
+  }
+
+  // Importance heatmap: valid payload → 200
+  {
+    const r = await fetch(`${API}/api/importance-heatmap`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "This article explains React state, effects, and performance tradeoffs.",
+        domStats: {
+          images: 3,
+          iframes: 0,
+          videos: 0,
+          buttons: 4,
+          links: 12,
+          maxDepthSample: 6,
+        },
+        blocks: [
+          {
+            id: "b-1",
+            text: "React state lets components update the UI based on data changes and user actions.",
+            category: "main-content",
+            relevance: 92,
+            visibility: 0.95,
+            difficultTermsCount: 2,
+          },
+          {
+            id: "b-2",
+            text: "Related articles and popular tags are listed in the sidebar.",
+            category: "sidebar",
+            relevance: 28,
+            visibility: 0.6,
+            difficultTermsCount: 0,
+          },
+        ],
+      }),
+    });
+    assert(r.ok, "POST /api/importance-heatmap with payload → 200");
+    const d = (await r.json()) as {
+      importance?: Array<{ id?: string; score?: number }>;
+      reason?: string;
+    };
+    assert(Array.isArray(d.importance), "Importance response has array");
+    assert((d.importance ?? []).length > 0, "Importance array is non-empty");
+    assert(typeof d.importance?.[0]?.id === "string", "Importance item has id");
+    assert(typeof d.importance?.[0]?.score === "number", "Importance item has score");
+    assert(typeof d.reason === "string", "Importance response has reason string");
   }
 
   // Define: missing text → 400

@@ -1,6 +1,7 @@
 import type {
   AnalysisBlock,
   DomStats,
+  ImportanceScore,
   NodeCategory,
   PageAnalysis,
 } from "../shared/messages.js";
@@ -515,6 +516,43 @@ export function applyImportanceHeatmap(
   topN = 8,
   attributeName = "data-neuro-inclusive-importance"
 ): number {
+  const ranked = [...lastBlocks]
+    .filter((block) => block.relevance > 0)
+    .sort((a, b) => b.relevance - a.relevance)
+    .map((block) => ({ block, score: block.relevance }));
+
+  return applyRankedImportanceHeatmap(ranked, topN, attributeName);
+}
+
+export function applyImportanceHeatmapFromScores(
+  scores: ImportanceScore[],
+  topN = 8,
+  attributeName = "data-neuro-inclusive-importance"
+): number {
+  const scoreById = new Map<string, number>();
+  for (const item of scores) {
+    if (!item || typeof item.id !== "string") continue;
+    const numeric = Number(item.score);
+    if (!Number.isFinite(numeric)) continue;
+    scoreById.set(item.id, Math.max(0, Math.min(100, numeric)));
+  }
+
+  const ranked = [...lastBlocks]
+    .map((block) => ({
+      block,
+      score: scoreById.get(block.id) ?? Math.max(0, Math.min(100, block.relevance)),
+    }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  return applyRankedImportanceHeatmap(ranked, topN, attributeName);
+}
+
+function applyRankedImportanceHeatmap(
+  rankedBlocks: Array<{ block: MutableBlock; score: number }>,
+  topN = 8,
+  attributeName = "data-neuro-inclusive-importance"
+): number {
   for (const el of importantElements) {
     el.removeAttribute(attributeName);
     el.style.removeProperty("--neuro-importance-intensity");
@@ -523,16 +561,14 @@ export function applyImportanceHeatmap(
 
   if (topN <= 0) return 0;
 
-  const ranked = [...lastBlocks]
-    .filter((block) => block.relevance > 0)
-    .sort((a, b) => b.relevance - a.relevance)
-    .slice(0, topN);
+  const ranked = rankedBlocks.slice(0, topN);
 
   if (!ranked.length) return 0;
 
-  const maxScore = Math.max(1, ranked[0].relevance);
-  for (const block of ranked) {
-    const intensity = Math.max(0.18, Math.min(0.78, block.relevance / maxScore));
+  const maxScore = Math.max(1, ranked[0].score);
+  for (const item of ranked) {
+    const intensity = Math.max(0.18, Math.min(0.78, item.score / maxScore));
+    const block = item.block;
     block.element.setAttribute(attributeName, "1");
     block.element.style.setProperty("--neuro-importance-intensity", intensity.toFixed(2));
     importantElements.add(block.element);

@@ -3,7 +3,7 @@
   "name": "Neuro-Inclusive Web Interface",
   "version": "1.0.0",
   "description": "AI-assisted cognitively accessible, distraction-free reading for ADHD, autism, and dyslexia.",
-  "permissions": ["storage", "activeTab", "scripting"],
+  "permissions": ["storage", "activeTab", "scripting", "sidePanel"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js",
@@ -12,6 +12,9 @@
   "action": {
     "default_popup": "popup.html",
     "default_title": "Neuro-Inclusive"
+  },
+  "side_panel": {
+    "default_path": "popup.html"
   },
   "content_scripts": [
     {

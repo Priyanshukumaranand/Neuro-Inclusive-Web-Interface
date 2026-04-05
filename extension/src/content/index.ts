@@ -8,6 +8,7 @@ import type {
   ContentRequest,
   ContentResponse,
   DomStats,
+  ImportanceCandidate,
   PageAnalysis,
   PageSettings,
 } from "../shared/messages.js";
@@ -16,6 +17,7 @@ import {
   analyzePageDom,
   applyDifficultHighlights,
   applyImportanceHeatmap,
+  applyImportanceHeatmapFromScores,
   clearImportanceHeatmap,
   clearDifficultHighlights,
   getClassifiedElements,
@@ -54,6 +56,9 @@ const FLOW_SYNC_MS = 900;
 const FLOW_UPDATE_MIN_MS = 140;
 const FLOW_STORAGE_KEY = "neuro-inclusive-reading-flow-v1";
 const MAX_STRUCTURED_SECTIONS = 8;
+const MAX_IMPORTANCE_BLOCKS = 24;
+const MAX_IMPORTANCE_BLOCK_CHARS = 440;
+const IMPORTANCE_TOP_N = 10;
 const DISTRACTION_REFRESH_MIN_MS = 850;
 const CLUTTER_RE =
   /\b(nav|menu|toolbar|header|footer|sidebar|rail|recommend|related|promo|advert|sponsor|cookie|consent|subscribe|newsletter|share|social|widget|trending|upsell|floating|sticky)\b/i;
@@ -200,6 +205,7 @@ let flowUpdateTimer: number | null = null;
 let flowLastUpdatedAt = 0;
 let flowLastSavedAt = 0;
 let importanceHeatmapEnabled = false;
+let importanceRequestId = 0;
 
 function ensureStyleEl(): HTMLStyleElement {
   if (!styleEl) {
@@ -639,16 +645,83 @@ function buildStructuredLayoutText(analysis: PageAnalysis): string {
   ].join("\n");
 }
 
+function normalizeImportanceChunk(text: string): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, MAX_IMPORTANCE_BLOCK_CHARS);
+}
+
+function buildImportanceCandidates(analysis: PageAnalysis): ImportanceCandidate[] {
+  return (analysis.blocks || [])
+    .map((block) => ({
+      id: block.id,
+      text: normalizeImportanceChunk(block.text),
+      category: block.category,
+      relevance: Number.isFinite(block.relevance) ? block.relevance : 0,
+      visibility: Number.isFinite(block.visibility) ? block.visibility : 0,
+      difficultTermsCount: Array.isArray(block.difficultTerms) ? block.difficultTerms.length : 0,
+    }))
+    .filter((block) => block.text.length >= 24)
+    .slice(0, MAX_IMPORTANCE_BLOCKS);
+}
+
 function setImportanceHeatmapEnabled(enabled: boolean): void {
+  importanceRequestId++;
   importanceHeatmapEnabled = enabled;
-  if (enabled) {
-    void getPageAnalysis(true);
-    const count = applyImportanceHeatmap(10);
-    setQuickStatus(count > 0 ? `Highlighted ${count} important blocks.` : "No important blocks found.");
-  } else {
+  if (!enabled) {
     clearImportanceHeatmap();
     setQuickStatus("Importance highlights cleared.");
+    return;
   }
+
+  const analysis = getPageAnalysis(true);
+  const warmupCount = applyImportanceHeatmap(IMPORTANCE_TOP_N);
+  setQuickStatus(
+    warmupCount > 0
+      ? "Analyzing importance with AI..."
+      : "Scanning page to find important content..."
+  );
+
+  const candidates = buildImportanceCandidates(analysis);
+  if (!candidates.length) {
+    setQuickStatus(warmupCount > 0 ? `Highlighted ${warmupCount} important blocks.` : "No important blocks found.");
+    return;
+  }
+
+  const requestId = importanceRequestId;
+  const sourceText = (analysis.prioritizedText || analysis.text)
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_TEXT_FOR_REMOTE);
+
+  void (async () => {
+    const res = await bgRequest({
+      type: "API_IMPORTANCE_HEATMAP",
+      text: sourceText,
+      domStats: analysis.domStats,
+      blocks: candidates,
+      apiBase: currentApiBase,
+    });
+
+    if (!importanceHeatmapEnabled || requestId !== importanceRequestId) {
+      return;
+    }
+
+    if (res.ok && Array.isArray(res.importance) && res.importance.length > 0) {
+      const count = applyImportanceHeatmapFromScores(res.importance, IMPORTANCE_TOP_N);
+      setQuickStatus(
+        count > 0
+          ? `Highlighted ${count} important blocks (AI).`
+          : "No important blocks found."
+      );
+      return;
+    }
+
+    const fallbackCount = applyImportanceHeatmap(IMPORTANCE_TOP_N);
+    setQuickStatus(
+      fallbackCount > 0
+        ? `Highlighted ${fallbackCount} important blocks (heuristic fallback).`
+        : "No important blocks found."
+    );
+  })();
 }
 
 function shouldIgnoreDistractionTarget(el: HTMLElement): boolean {
@@ -1627,13 +1700,39 @@ function ensureQuickDismissHandlers(): void {
   });
 }
 
+async function openMainUiFromLauncher(): Promise<void> {
+  try {
+    const res = (await chrome.runtime.sendMessage({
+      type: "OPEN_MAIN_UI",
+    })) as BackgroundResponse;
+
+    if (!res.ok) {
+      if (!quickPanelEl) {
+        ensureQuickPanel();
+      }
+      setQuickPanelOpen(true);
+      setQuickStatus("Could not open main panel. Opened quick menu instead.");
+      return;
+    }
+
+    showSimplifiedPanel("", false);
+    setQuickPanelOpen(false);
+  } catch {
+    if (!quickPanelEl) {
+      ensureQuickPanel();
+    }
+    setQuickPanelOpen(true);
+    setQuickStatus("Could not open main panel. Opened quick menu instead.");
+  }
+}
+
 function ensureQuickLauncher(): HTMLButtonElement {
   if (quickLauncherEl) return quickLauncherEl;
 
   quickLauncherEl = document.createElement("button");
   quickLauncherEl.id = QUICK_LAUNCHER_ID;
   quickLauncherEl.type = "button";
-  quickLauncherEl.setAttribute("aria-label", "Open Neuro menu");
+  quickLauncherEl.setAttribute("aria-label", "Open Neuro panel");
   quickLauncherEl.setAttribute("aria-expanded", "false");
   quickLauncherEl.textContent = "Neuro";
   quickLauncherEl.style.cssText = `
@@ -1652,6 +1751,11 @@ function ensureQuickLauncher(): HTMLButtonElement {
     box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
   `;
   quickLauncherEl.addEventListener("click", () => {
+    void openMainUiFromLauncher();
+  });
+
+  quickLauncherEl.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
     if (!quickPanelEl) {
       ensureQuickPanel();
     }
@@ -2187,6 +2291,37 @@ chrome.runtime.onMessage.addListener(
       }
       if (msg.type === "SHOW_SIMPLIFIED") {
         showSimplifiedPanel(msg.simplified, msg.show);
+        return sendResponse({ ok: true });
+      }
+      if (msg.type === "SHOW_QUICK_RESULT") {
+        if (!quickPanelEl) {
+          ensureQuickPanel();
+        }
+        if (msg.open) {
+          setQuickPanelOpen(true);
+        }
+        showQuickResult(msg.text);
+        showSimplifiedPanel("", false);
+        setQuickStatus("Updated from popup.");
+        return sendResponse({ ok: true });
+      }
+      if (msg.type === "HIDE_QUICK_RESULT") {
+        hideQuickResult();
+        showSimplifiedPanel("", false);
+        setQuickStatus("Text panel hidden.");
+        return sendResponse({ ok: true });
+      }
+      if (msg.type === "CONTINUE_READING") {
+        continueReadingFromMarker();
+        return sendResponse({ ok: true });
+      }
+      if (msg.type === "SHOW_STRUCTURED_LAYOUT") {
+        showStructuredLayoutFromQuickMenu();
+        return sendResponse({ ok: true });
+      }
+      if (msg.type === "SET_IMPORTANCE_HEATMAP") {
+        setImportanceHeatmapEnabled(msg.on);
+        syncQuickToggleState();
         return sendResponse({ ok: true });
       }
       if (msg.type === "SET_FOCUS_MODE") {

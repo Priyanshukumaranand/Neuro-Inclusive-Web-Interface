@@ -37,6 +37,20 @@ export type AnalysisBlock = {
   difficultTerms: string[];
 };
 
+export type ImportanceCandidate = {
+  id: string;
+  text: string;
+  category: NodeCategory;
+  relevance: number;
+  visibility: number;
+  difficultTermsCount: number;
+};
+
+export type ImportanceScore = {
+  id: string;
+  score: number;
+};
+
 export type PageAnalysis = {
   text: string;
   prioritizedText: string;
@@ -49,10 +63,25 @@ export type BackgroundRequest =
   | { type: "API_SIMPLIFY"; text: string; apiBase: string }
   | { type: "API_SUMMARIZE"; text: string; mode: "tldr" | "bullets"; apiBase: string }
   | { type: "API_COGNITIVE_LOAD"; text: string; domStats: DomStats; apiBase: string }
+  | {
+      type: "API_IMPORTANCE_HEATMAP";
+      text: string;
+      domStats: DomStats;
+      blocks: ImportanceCandidate[];
+      apiBase: string;
+    }
   | { type: "API_DEFINE"; text: string; apiBase: string };
 
 export type BackgroundResponse =
-  | { ok: true; simplified?: string; summary?: string; score?: number; reason?: string; definition?: string }
+  | {
+      ok: true;
+      simplified?: string;
+      summary?: string;
+      score?: number;
+      reason?: string;
+      definition?: string;
+      importance?: ImportanceScore[];
+    }
   | { ok: false; error: string };
 
 export type ContentRequest =
@@ -61,6 +90,11 @@ export type ContentRequest =
   | { type: "GET_PAGE_ANALYSIS" }
   | { type: "APPLY_SETTINGS"; settings: PageSettings; apiBase?: string }
   | { type: "SHOW_SIMPLIFIED"; simplified: string; show: boolean }
+  | { type: "SHOW_QUICK_RESULT"; text: string; open?: boolean }
+  | { type: "HIDE_QUICK_RESULT" }
+  | { type: "CONTINUE_READING" }
+  | { type: "SHOW_STRUCTURED_LAYOUT" }
+  | { type: "SET_IMPORTANCE_HEATMAP"; on: boolean }
   | { type: "SET_FOCUS_MODE"; on: boolean }
   | { type: "PING" };
 

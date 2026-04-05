@@ -68,6 +68,33 @@ function buildKeyPointsText(sourceText: string, bullets: string): string {
   ].join("\n");
 }
 
+function buildStructuredLayoutText(analysis: PageAnalysis): string {
+  const title = (document.title || "Untitled page").trim();
+  const ranked = (analysis.blocks || [])
+    .filter((b) => b.category === "main-content" || b.category === "dense-text" || b.category === "other")
+    .sort((a, b) => b.relevance - a.relevance)
+    .slice(0, 8);
+
+  const sections = ranked.map((block, idx) => {
+    const sentences = block.text
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 3);
+    const bullets = (sentences.length ? sentences : [block.text.slice(0, 180)])
+      .map((s) => `- ${s}`)
+      .join("\n");
+    return `Section ${idx + 1}\n${bullets}`;
+  });
+
+  return [
+    `Title: ${title}`,
+    "",
+    "Structured sections:",
+    sections.join("\n\n") || "No main sections found.",
+  ].join("\n");
+}
+
 function cognitiveBand(score: number | null): "Easy" | "Medium" | "Hard" | "—" {
   if (score == null) return "—";
   if (score < 35) return "Easy";
@@ -159,11 +186,21 @@ export default function App() {
     s.readabilityMode,
     s.distractionReduction,
     s.focusMode,
+    s.importanceHeatmap,
     s.bionicReading,
     s.readingRuler,
     s.useServerCognitive,
     persist,
   ]);
+
+  const syncQuickResult = useCallback(async (text: string) => {
+    if (!text.trim()) return;
+    await sendToActiveTab({
+      type: "SHOW_QUICK_RESULT",
+      text,
+      open: false,
+    });
+  }, []);
 
   const applyToPage = useCallback(async () => {
     if (isApplying) return;
@@ -177,7 +214,21 @@ export default function App() {
         settings,
         apiBase,
       });
-      s.setStatus(r.ok ? "Applied to page." : r.error ?? "Failed");
+      if (!r.ok) {
+        s.setStatus(r.error ?? "Failed");
+        return;
+      }
+
+      const heatmapRes = await sendToActiveTab({
+        type: "SET_IMPORTANCE_HEATMAP",
+        on: s.importanceHeatmap,
+      });
+      if (!heatmapRes.ok) {
+        s.setStatus(`Applied, but heatmap failed: ${heatmapRes.error}`);
+        return;
+      }
+
+      s.setStatus("Applied to page.");
     } finally {
       setIsApplying(false);
     }
@@ -347,10 +398,11 @@ export default function App() {
       simplified,
       show: true,
     });
+    await syncQuickResult(simplified);
     s.setStatus(
       `${usedAi ? "Simplified with AI" : "Simplified deterministically"}. Toggle Original / Simplified below.${statusNote}`
     );
-  }, [s]);
+  }, [s, syncQuickResult]);
 
   const toggleView = useCallback(async () => {
     const cur = useStore.getState().simplifiedView;
@@ -368,6 +420,7 @@ export default function App() {
       simplified: text,
       show: true,
     });
+    await syncQuickResult(text);
   }, []);
 
   const summarize = useCallback(
@@ -413,6 +466,7 @@ export default function App() {
 
         const smartTldr = buildSmartTldrText(sourceText, tldrText, bulletsText);
         s.setSummaryText(smartTldr);
+        await syncQuickResult(smartTldr);
         if (apiTldr.ok || apiBullets.ok) {
           s.setStatus("Smart TL;DR ready.");
         } else {
@@ -432,7 +486,9 @@ export default function App() {
       let summary = apiSummary ?? "";
       if (!api.ok || typeof api.summary !== "string" || !apiSummary) {
         summary = localSummarize(sourceText, "bullets");
-        s.setSummaryText(buildKeyPointsText(sourceText, summary));
+        const keyPoints = buildKeyPointsText(sourceText, summary);
+        s.setSummaryText(keyPoints);
+        await syncQuickResult(keyPoints);
         if (!api.ok) {
           s.setStatus(`Bullets (offline fallback: ${api.error})`);
         } else if (typeof api.summary !== "string") {
@@ -442,15 +498,55 @@ export default function App() {
         }
         return;
       }
-      s.setSummaryText(buildKeyPointsText(sourceText, summary));
+      const keyPoints = buildKeyPointsText(sourceText, summary);
+      s.setSummaryText(keyPoints);
+      await syncQuickResult(keyPoints);
       s.setStatus("Bullets ready.");
     },
-    [s]
+    [s, syncQuickResult]
   );
+
+  const showStructuredView = useCallback(async () => {
+    s.setStatus("Building structured view…");
+    const analysis = await getPageAnalysisFromActiveTab();
+    if (!analysis) {
+      s.setStatus("No readable text on this page.");
+      return;
+    }
+
+    const structured = buildStructuredLayoutText(analysis);
+    s.setSummaryText(structured);
+
+    await sendToActiveTab({ type: "SHOW_STRUCTURED_LAYOUT" });
+    await syncQuickResult(structured);
+    s.setStatus("Structured view ready.");
+  }, [s, syncQuickResult]);
+
+  const continueReading = useCallback(async () => {
+    const res = await sendToActiveTab({ type: "CONTINUE_READING" });
+    s.setStatus(res.ok ? "Continued reading on page." : res.error ?? "Continue reading failed.");
+  }, [s]);
+
+  const hidePageTextPanels = useCallback(async () => {
+    const [hideQuick, hideSimplified] = await Promise.all([
+      sendToActiveTab({ type: "HIDE_QUICK_RESULT" }),
+      sendToActiveTab({ type: "SHOW_SIMPLIFIED", simplified: "", show: false }),
+    ]);
+
+    if (hideQuick.ok || hideSimplified.ok) {
+      s.setStatus("Page text panels hidden.");
+      return;
+    }
+    s.setStatus(hideQuick.error ?? hideSimplified.error ?? "Could not hide page panels.");
+  }, [s]);
 
   const hasSummary = s.summaryText.trim().length > 0;
   const hasSimplifiedCompare =
     s.lastSimplified.trim().length > 0 && s.lastOriginalSample.trim().length > 0;
+  const hasCognitiveData =
+    s.cognitiveBefore != null ||
+    s.cognitiveAfter != null ||
+    s.cognitiveFactors.trim().length > 0;
   const statusText = s.status.trim() || "Ready.";
   const beforeBand = cognitiveBand(s.cognitiveBefore);
   const afterBand = cognitiveBand(s.cognitiveAfter);
@@ -462,28 +558,9 @@ export default function App() {
         <p className="subtitle">Make long pages calmer and easier to read.</p>
       </header>
 
-      <section className="section">
-        <h2>Profile</h2>
-        <p className="hint">Choose a preset, then apply.</p>
-        <div className="profile-grid">
-          {PROFILE_LIST.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              className={s.profile === p.id ? "chip is-active" : "chip"}
-              onClick={() => {
-                s.setProfile(p.id);
-              }}
-              title={p.description}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
-      </section>
-
       <section className="section compact">
-        <h2>Quick options</h2>
+        <h2>Essentials</h2>
+        <p className="hint">Turn on only what helps your reading right now.</p>
         <label className="chk">
           <input
             type="checkbox"
@@ -510,9 +587,19 @@ export default function App() {
           />
           Cursor spotlight (dim rest)
         </label>
+        <label className="chk">
+          <input
+            type="checkbox"
+            checked={s.importanceHeatmap}
+            onChange={(e) => s.setImportanceHeatmap(e.target.checked)}
+          />
+          Importance heatmap
+        </label>
       </section>
 
       <section className="section actions">
+        <h2>Main actions</h2>
+        <p className="hint">Apply first, then simplify or summarize.</p>
         <button
           type="button"
           className="primary wide"
@@ -522,55 +609,75 @@ export default function App() {
           {isApplying ? "Applying..." : "Apply to page"}
         </button>
         <div className="row">
-          <button type="button" className="secondary" onClick={() => void scorePage()}>
-            Analyze load
-          </button>
           <button type="button" className="primary" onClick={() => void simplifyPage()}>
             Simplify text
           </button>
-        </div>
-        <div className="row">
           <button type="button" className="secondary" onClick={() => void summarize("tldr")}>
             Smart TL;DR
           </button>
-          <button
-            type="button"
-            className="secondary"
-            onClick={() => void summarize("bullets")}
-          >
-            Key points
-          </button>
         </div>
-        {hasSimplifiedCompare ? (
-          <button type="button" className="ghost" onClick={() => void toggleView()}>
-            {s.simplifiedView === "simplified"
-              ? "Show original text"
-              : "Show simplified text"}
-          </button>
-        ) : null}
+
+        <details className="details-inline">
+          <summary>More tools</summary>
+          <div className="tools-stack">
+            <p className="hint">These tools also update the on-page Neuro menu.</p>
+            <div className="row">
+              <button type="button" className="secondary" onClick={() => void scorePage()}>
+                Analyze load
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => void summarize("bullets")}
+              >
+                Key points
+              </button>
+            </div>
+            <div className="row">
+              <button type="button" className="secondary" onClick={() => void showStructuredView()}>
+                Structured view
+              </button>
+              <button type="button" className="secondary" onClick={() => void continueReading()}>
+                Continue reading
+              </button>
+            </div>
+            {hasSimplifiedCompare ? (
+              <button type="button" className="ghost wide" onClick={() => void toggleView()}>
+                {s.simplifiedView === "simplified"
+                  ? "Show original text"
+                  : "Show simplified text"}
+              </button>
+            ) : null}
+            <button type="button" className="ghost wide" onClick={() => void hidePageTextPanels()}>
+              Hide page text panel
+            </button>
+          </div>
+        </details>
       </section>
 
-      <section className="section compact">
-        <h2>Cognitive load</h2>
-        <div className="score-grid">
-          <div className="score-item">
-            <span className="score-label">Before</span>
-            <span className="score-pill before">{s.cognitiveBefore ?? "--"}</span>
-            <span className="score-band">{beforeBand}</span>
+      {hasCognitiveData ? (
+        <section className="section compact">
+          <h2>Cognitive load</h2>
+          <div className="score-grid">
+            <div className="score-item">
+              <span className="score-label">Before</span>
+              <span className="score-pill before">{s.cognitiveBefore ?? "--"}</span>
+              <span className="score-band">{beforeBand}</span>
+            </div>
+            <div className="score-item">
+              <span className="score-label">After</span>
+              <span className="score-pill after">{s.cognitiveAfter ?? "--"}</span>
+              <span className="score-band">{afterBand}</span>
+            </div>
           </div>
-          <div className="score-item">
-            <span className="score-label">After</span>
-            <span className="score-pill after">{s.cognitiveAfter ?? "--"}</span>
-            <span className="score-band">{afterBand}</span>
-          </div>
-        </div>
-        {s.cognitiveFactors ? (
-          <details className="details-inline">
-            <summary>How this score was calculated</summary>
-            <p className="hint">{s.cognitiveFactors}</p>
-          </details>
-        ) : null}
-      </section>
+          {s.cognitiveFactors ? (
+            <details className="details-inline">
+              <summary>How this score was calculated</summary>
+              <p className="hint">{s.cognitiveFactors}</p>
+            </details>
+          ) : null}
+        </section>
+      ) : null}
 
       {hasSummary ? (
         <section className="section compact">
@@ -580,7 +687,29 @@ export default function App() {
       ) : null}
 
       <details className="details-block">
-        <summary>Advanced settings</summary>
+        <summary>Profiles </summary>
+        <div className="advanced-stack">
+          <p className="hint">Choose a preset, then apply.</p>
+          <div className="profile-grid">
+            {PROFILE_LIST.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                className={s.profile === p.id ? "chip is-active" : "chip"}
+                onClick={() => {
+                  s.setProfile(p.id);
+                }}
+                title={p.description}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </details>
+
+      <details className="details-block">
+        <summary>Advanced settings </summary>
         <div className="advanced-stack">
           <label className="field">
             API base URL

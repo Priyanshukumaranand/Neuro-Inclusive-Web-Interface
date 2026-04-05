@@ -260,6 +260,16 @@ pre.summary {
   margin-top: 4px;
 }
 
+.tools-stack {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.tools-stack .hint {
+  margin: 0;
+}
+
 .details-block {
   margin-top: 12px;
   border: 1px dashed var(--border);

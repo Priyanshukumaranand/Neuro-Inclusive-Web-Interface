@@ -1,8 +1,15 @@
 /**
  * Service worker: proxies AI requests to the local/backend API so keys never ship in the extension.
  */
-import type { BackgroundRequest, BackgroundResponse } from "../shared/messages.js";
+import type {
+  BackgroundRequest,
+  BackgroundResponse,
+  ImportanceScore,
+} from "../shared/messages.js";
 import { fnv1aHash, LruCache } from "./lruCache.js";
+
+type OpenMainUiRequest = { type: "OPEN_MAIN_UI" };
+type InboundRequest = BackgroundRequest | OpenMainUiRequest;
 
 const DEFAULT_API_BASE = "http://localhost:3000";
 const REQUEST_TIMEOUT_MS = 12000;
@@ -13,6 +20,7 @@ const responseCache = new LruCache<BackgroundResponse>(CACHE_SIZE);
 function cacheTtl(message: BackgroundRequest): number {
   if (message.type === "API_SIMPLIFY") return 15 * 60 * 1000;
   if (message.type === "API_SUMMARIZE") return 10 * 60 * 1000;
+  if (message.type === "API_IMPORTANCE_HEATMAP") return 4 * 60 * 1000;
   if (message.type === "API_DEFINE") return 60 * 60 * 1000;
   return 5 * 60 * 1000;
 }
@@ -23,6 +31,11 @@ function cacheKeyFor(message: BackgroundRequest, base: string): string {
   }
   if (message.type === "API_SUMMARIZE") {
     return `summarize:${message.mode}:${fnv1aHash(base)}:${fnv1aHash(message.text)}`;
+  }
+  if (message.type === "API_IMPORTANCE_HEATMAP") {
+    return `importance:${fnv1aHash(base)}:${fnv1aHash(message.text)}:${fnv1aHash(
+      JSON.stringify(message.blocks)
+    )}:${fnv1aHash(JSON.stringify(message.domStats))}`;
   }
   if (message.type === "API_DEFINE") {
     return `define:${fnv1aHash(base)}:${fnv1aHash(message.text)}`;
@@ -67,6 +80,23 @@ function asObject(v: unknown): Record<string, unknown> | null {
     return v as Record<string, unknown>;
   }
   return null;
+}
+
+function normalizeImportance(value: unknown): ImportanceScore[] | null {
+  if (!Array.isArray(value)) return null;
+  const out: ImportanceScore[] = [];
+  for (const item of value) {
+    const obj = asObject(item);
+    if (!obj) continue;
+    const id = typeof obj.id === "string" ? obj.id.trim() : "";
+    const numeric = typeof obj.score === "number" ? obj.score : Number(obj.score);
+    if (!id || !Number.isFinite(numeric)) continue;
+    out.push({
+      id,
+      score: Math.max(0, Math.min(100, numeric)),
+    });
+  }
+  return out;
 }
 
 async function readHttpError(res: Response): Promise<string> {
@@ -117,18 +147,104 @@ async function postJson(
   }
 }
 
+async function resolveTargetTabId(
+  sender: chrome.runtime.MessageSender
+): Promise<number | undefined> {
+  if (sender.tab?.id != null) {
+    return sender.tab.id;
+  }
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab?.id;
+}
+
+async function openMainUi(
+  sender: chrome.runtime.MessageSender
+): Promise<BackgroundResponse> {
+  const sidePanelApi = (
+    chrome as unknown as {
+      sidePanel?: {
+        setOptions?: (opts: {
+          tabId?: number;
+          path?: string;
+          enabled?: boolean;
+        }) => Promise<void>;
+        open?: (opts: { tabId?: number; windowId?: number }) => Promise<void>;
+      };
+    }
+  ).sidePanel;
+
+  const tabId = await resolveTargetTabId(sender);
+
+  if (tabId != null && sidePanelApi?.open) {
+    try {
+      if (sidePanelApi.setOptions) {
+        await sidePanelApi.setOptions({
+          tabId,
+          path: "popup.html",
+          enabled: true,
+        });
+      }
+      await sidePanelApi.open({ tabId });
+      return { ok: true, reason: "Opened side panel." };
+    } catch {
+      // Fall back to popup APIs below.
+    }
+  }
+
+  const actionApi = chrome.action as unknown as {
+    openPopup?: () => Promise<void>;
+  };
+  if (typeof actionApi.openPopup === "function") {
+    try {
+      await actionApi.openPopup();
+      return { ok: true, reason: "Opened toolbar popup." };
+    } catch {
+      // Fall back to standalone extension window.
+    }
+  }
+
+  const popupUrl = chrome.runtime.getURL("popup.html");
+  try {
+    await chrome.windows.create({
+      url: popupUrl,
+      type: "popup",
+      focused: true,
+      width: 420,
+      height: 760,
+    });
+    return { ok: true, reason: "Opened popup window." };
+  } catch {
+    try {
+      await chrome.tabs.create({ url: popupUrl, active: true });
+      return { ok: true, reason: "Opened popup tab." };
+    } catch (e) {
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : "Could not open Neuro panel",
+      };
+    }
+  }
+}
+
 chrome.runtime.onMessage.addListener(
   (
-    message: BackgroundRequest,
-    _sender,
+    message: InboundRequest,
+    sender,
     sendResponse: (r: BackgroundResponse) => void
   ) => {
-    void handle(message).then(sendResponse);
+    void handle(message, sender).then(sendResponse);
     return true;
   }
 );
 
-async function handle(message: BackgroundRequest): Promise<BackgroundResponse> {
+async function handle(
+  message: InboundRequest,
+  sender: chrome.runtime.MessageSender
+): Promise<BackgroundResponse> {
+  if (message.type === "OPEN_MAIN_UI") {
+    return openMainUi(sender);
+  }
+
   const base = normalizeApiBase(message.apiBase);
   const cacheKey = cacheKeyFor(message, base);
   const cached = readCached(cacheKey);
@@ -158,6 +274,26 @@ async function handle(message: BackgroundRequest): Promise<BackgroundResponse> {
       return writeCached(cacheKey, message, {
         ok: true,
         summary: r.data.summary,
+      });
+    }
+    if (message.type === "API_IMPORTANCE_HEATMAP") {
+      const r = await postJson(`${base}/api/importance-heatmap`, {
+        text: message.text,
+        domStats: message.domStats,
+        blocks: message.blocks,
+      });
+      if (!r.ok) return { ok: false, error: r.error };
+
+      const importance = normalizeImportance(r.data.importance);
+      if (!importance || importance.length === 0) {
+        return { ok: false, error: "Invalid importance-heatmap response" };
+      }
+
+      const reason = typeof r.data.reason === "string" ? r.data.reason : undefined;
+      return writeCached(cacheKey, message, {
+        ok: true,
+        importance,
+        reason,
       });
     }
     if (message.type === "API_COGNITIVE_LOAD") {

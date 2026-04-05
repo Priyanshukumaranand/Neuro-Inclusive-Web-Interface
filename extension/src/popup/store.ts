@@ -31,6 +31,7 @@ export type AppState = {
   readabilityMode: boolean;
   distractionReduction: boolean;
   focusMode: boolean;
+  importanceHeatmap: boolean;
   bionicReading: boolean;
   readingRuler: boolean;
   simplifiedView: "original" | "simplified";
@@ -50,6 +51,7 @@ export type AppState = {
   setSummaryText: (s: string) => void;
   setCognitive: (before: number | null, after: number | null, factors?: string) => void;
   setUseServerCognitive: (v: boolean) => void;
+  setImportanceHeatmap: (v: boolean) => void;
   setStatus: (s: string) => void;
   hydrate: () => Promise<void>;
   persist: () => Promise<void>;
@@ -66,6 +68,7 @@ const defaultSettings: Pick<
   | "readabilityMode"
   | "distractionReduction"
   | "focusMode"
+  | "importanceHeatmap"
   | "bionicReading"
   | "readingRuler"
   | "simplifiedView"
@@ -86,6 +89,7 @@ const defaultSettings: Pick<
   readabilityMode: false,
   distractionReduction: false,
   focusMode: false,
+  importanceHeatmap: false,
   bionicReading: false,
   readingRuler: false,
   simplifiedView: "simplified",
@@ -107,6 +111,7 @@ const defaultPagePreset: Pick<
   | "readabilityMode"
   | "distractionReduction"
   | "focusMode"
+  | "importanceHeatmap"
   | "bionicReading"
   | "readingRuler"
 > = {
@@ -117,6 +122,7 @@ const defaultPagePreset: Pick<
   readabilityMode: defaultSettings.readabilityMode,
   distractionReduction: defaultSettings.distractionReduction,
   focusMode: defaultSettings.focusMode,
+  importanceHeatmap: defaultSettings.importanceHeatmap,
   bionicReading: defaultSettings.bionicReading,
   readingRuler: defaultSettings.readingRuler,
 };
@@ -156,6 +162,7 @@ export const useStore = create<AppState>((set, get) => ({
   setCognitive: (cognitiveBefore, cognitiveAfter, cognitiveFactors = "") =>
     set({ cognitiveBefore, cognitiveAfter, cognitiveFactors }),
   setUseServerCognitive: (useServerCognitive) => set({ useServerCognitive }),
+  setImportanceHeatmap: (importanceHeatmap) => set({ importanceHeatmap }),
   setStatus: (status) => set({ status }),
   hydrate: async () => {
     const r = await chrome.storage.sync.get(STORAGE_KEY);
@@ -182,6 +189,7 @@ export const useStore = create<AppState>((set, get) => ({
       readabilityMode,
       distractionReduction,
       focusMode,
+      importanceHeatmap,
       bionicReading,
       readingRuler,
       useServerCognitive,
@@ -197,6 +205,7 @@ export const useStore = create<AppState>((set, get) => ({
         readabilityMode,
         distractionReduction,
         focusMode,
+        importanceHeatmap,
         bionicReading,
         readingRuler,
         useServerCognitive,

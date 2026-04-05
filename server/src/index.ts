@@ -5,6 +5,7 @@ import simplifyRouter from "./routes/simplify.js";
 import summarizeRouter from "./routes/summarize.js";
 import cognitiveLoadRouter from "./routes/cognitiveLoad.js";
 import defineRouter from "./routes/define.js";
+import importanceHeatmapRouter from "./routes/importanceHeatmap.js";
 import { isGeminiConfigured } from "./lib/gemini.js";
 
 const app = express();
@@ -31,6 +32,7 @@ app.use("/api/simplify", simplifyRouter);
 app.use("/api/summarize", summarizeRouter);
 app.use("/api/cognitive-load", cognitiveLoadRouter);
 app.use("/api/define", defineRouter);
+app.use("/api/importance-heatmap", importanceHeatmapRouter);
 
 app.listen(PORT, () => {
   console.log(`Neuro-Inclusive API listening on http://localhost:${PORT}`);
