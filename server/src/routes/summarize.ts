@@ -18,7 +18,7 @@ function mockSummarize(text: string, mode: "tldr" | "bullets"): string {
     .filter(Boolean);
 
   if (mode === "tldr") {
-    return sentences.slice(0, 3).join(" ") || "No content to summarize.";
+    return sentences[0] || text.slice(0, 180) || "No content to summarize.";
   }
   // bullets
   return sentences

@@ -18,13 +18,14 @@ export function localSimplify(text: string): string {
 
 export function localSummarize(text: string, mode: "tldr" | "bullets"): string {
   const clipped = text.slice(0, MAX_IN);
+  const trimmed = clipped.trim();
   const sentences = clipped
     .split(/(?<=[.!?])\s+/)
     .map((s) => s.trim())
     .filter(Boolean);
 
   if (mode === "tldr") {
-    return sentences.slice(0, 3).join(" ") || "No content to summarize.";
+    return sentences[0] || trimmed.slice(0, 180) || "No content to summarize.";
   }
   return sentences
     .slice(0, 6)

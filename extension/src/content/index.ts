@@ -3,6 +3,7 @@
  * Guard: skip if already injected (prevents duplicate listeners on re-injection).
  */
 import type {
+  BackgroundRequest,
   BackgroundResponse,
   ContentRequest,
   ContentResponse,
@@ -10,11 +11,12 @@ import type {
   PageAnalysis,
   PageSettings,
 } from "../shared/messages.js";
-import { localDefine } from "../shared/localAiFallback.js";
 import { estimateMainElement } from "./extract.js";
 import {
   analyzePageDom,
   applyDifficultHighlights,
+  applyImportanceHeatmap,
+  clearImportanceHeatmap,
   clearDifficultHighlights,
   getClassifiedElements,
 } from "./domPipeline.js";
@@ -25,26 +27,103 @@ import {
 } from "./stylesInjected.js";
 
 const GUARD_ATTR = "data-neuro-inclusive-injected";
+const READY_ATTR = "data-neuro-inclusive-ready";
 
 function initContentScript(): void {
 const OVERLAY_ID = "neuro-inclusive-simplified-panel";
 const FOCUS_ID = "neuro-inclusive-focus-layer";
+const QUICK_LAUNCHER_ID = "neuro-inclusive-quick-launcher";
+const QUICK_PANEL_ID = "neuro-inclusive-quick-panel";
 const PAUSED_BY_EXTENSION_ATTR = "data-neuro-inclusive-paused";
 const HIDDEN_BY_EXTENSION_ATTR = "data-neuro-inclusive-hidden";
 const DIMMED_BY_EXTENSION_ATTR = "data-neuro-inclusive-dimmed";
 const ANALYSIS_TTL_MS = 1200;
+const MAX_TEXT_FOR_REMOTE = 6000;
+const MAX_TEXT_FOR_LOCAL = 12000;
 const MAX_EXPLAIN_SELECTION = 300;
+const FOCUS_SPOTLIGHT_RADIUS = 170;
+const FOCUS_EDGE_SOFTNESS = 54;
+const FOCUS_DIM_ALPHA = 0.62;
+const FLOW_PROGRESS_ID = "neuro-inclusive-flow-progress";
+const FLOW_PROGRESS_FILL_ID = "neuro-inclusive-flow-progress-fill";
+const FLOW_MARKER_ID = "neuro-inclusive-flow-marker";
+const FLOW_CURRENT_ATTR = "data-neuro-inclusive-flow-current";
+const FLOW_RESUME_ATTR = "data-neuro-inclusive-flow-resume";
+const FLOW_MIN_CHARS = 90;
+const FLOW_SYNC_MS = 900;
+const FLOW_STORAGE_KEY = "neuro-inclusive-reading-flow-v1";
+const MAX_STRUCTURED_SECTIONS = 8;
+
+function localDefineFallback(term: string): string {
+  const t = term.trim().slice(0, 200);
+  if (!t) return "Select a word or short phrase to explain.";
+  return `(Offline) "${t}": short explanation unavailable without the API - try a dictionary or enable the server.`;
+}
+
+function localSimplifyFallback(text: string): string {
+  const clipped = text.slice(0, MAX_TEXT_FOR_LOCAL);
+  const sentences = clipped.split(/(?<=[.!?])\s+/);
+  return sentences
+    .map((s) => {
+      const words = s.trim().split(/\s+/).filter(Boolean);
+      if (words.length > 22) return `${words.slice(0, 18).join(" ")}.`;
+      return s;
+    })
+    .join(" ")
+    .trim();
+}
+
+function localSummarizeFallback(text: string, mode: "tldr" | "bullets"): string {
+  const clipped = text.slice(0, MAX_TEXT_FOR_LOCAL);
+  const trimmed = clipped.trim();
+  const sentences = clipped
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (mode === "tldr") {
+    return sentences[0] || trimmed.slice(0, 180) || "No content to summarize.";
+  }
+  return sentences
+    .slice(0, 6)
+    .map((s) => `- ${s}`)
+    .join("\n");
+}
+
+function normalizeError(e: unknown): string {
+  return e instanceof Error ? e.message : String(e || "Unknown error");
+}
+
+async function bgRequest(message: BackgroundRequest): Promise<BackgroundResponse> {
+  try {
+    const response = (await chrome.runtime.sendMessage(message)) as BackgroundResponse;
+    return response;
+  } catch (e) {
+    return { ok: false, error: normalizeError(e) };
+  }
+}
 
 const DISTRACTION_HIDE_SELECTOR = [
   '[role="dialog"]',
   '[aria-modal="true"]',
   '[class*="modal"]',
+  '[id*="modal"]',
   '[class*="popup"]',
+  '[id*="popup"]',
   '[class*="overlay"]',
+  '[class*="interstitial"]',
+  '[class*="paywall"]',
+  '[class*="consent"]',
+  '[class*="gdpr"]',
   '[id*="cookie"]',
+  '[id*="consent"]',
+  '[aria-label*="cookie"]',
+  '[aria-label*="consent"]',
   '[class*="cookie"]',
   '[class*="newsletter"]',
   '[class*="subscribe"]',
+  '[data-testid*="modal"]',
+  '[data-testid*="popup"]',
 ].join(",");
 
 const DISTRACTION_DIM_SELECTOR = [
@@ -54,6 +133,16 @@ const DISTRACTION_DIM_SELECTOR = [
   '[id*="ad-"]',
   '[id*="ad_"]',
   '[class*="sponsor"]',
+  '[class*="promo"]',
+  '[class*="recommend"]',
+  '[class*="suggest"]',
+  '[class*="related"]',
+  '[class*="sticky"]',
+  '[class*="floating"]',
+  '[id*="sidebar"]',
+  '[class*="sidebar"]',
+  'nav',
+  'header[role="banner"]',
   'aside',
   '[role="complementary"]',
   'video[autoplay]',
@@ -62,15 +151,41 @@ const DISTRACTION_DIM_SELECTOR = [
 
 let styleEl: HTMLStyleElement | null = null;
 let distractionEl: HTMLStyleElement | null = null;
-let focusMainEl: HTMLElement | null = null;
 let focusListenersAttached = false;
 let focusRaf = 0;
+let focusPointerX = Math.round(window.innerWidth * 0.5);
+let focusPointerY = Math.round(window.innerHeight * 0.35);
 let cachedAnalysis: PageAnalysis | null = null;
 let cachedAnalysisAt = 0;
 const modifiedDistractionElements = new Set<HTMLElement>();
 const previousStyleByElement = new WeakMap<HTMLElement, string | null>();
 let distractionObserver: MutationObserver | null = null;
 let distractionRefreshRaf = 0;
+let currentSettings: PageSettings = {
+  theme: "default",
+  fontSizePx: 16,
+  lineHeight: 1.5,
+  letterSpacingEm: 0,
+  readabilityMode: false,
+  distractionReduction: false,
+  focusMode: false,
+  bionicReading: false,
+  readingRuler: false,
+};
+let quickLauncherEl: HTMLButtonElement | null = null;
+let quickPanelEl: HTMLDivElement | null = null;
+let quickStatusEl: HTMLDivElement | null = null;
+let quickReadabilityInput: HTMLInputElement | null = null;
+let quickDistractionInput: HTMLInputElement | null = null;
+let quickFocusInput: HTMLInputElement | null = null;
+let quickImportanceInput: HTMLInputElement | null = null;
+let readingFlowEnabled = false;
+let flowParagraphs: HTMLElement[] = [];
+let flowCurrentParagraph: HTMLElement | null = null;
+let flowResumeParagraph: HTMLElement | null = null;
+let flowUpdateRaf = 0;
+let flowLastSavedAt = 0;
+let importanceHeatmapEnabled = false;
 
 function ensureStyleEl(): HTMLStyleElement {
   if (!styleEl) {
@@ -143,9 +258,345 @@ function getPageAnalysis(force = false): PageAnalysis {
   }
 }
 
+function readingFlowPageKey(): string {
+  return `${location.hostname}${location.pathname}`;
+}
+
+function ensureFlowProgressBar(): HTMLDivElement {
+  let bar = document.getElementById(FLOW_PROGRESS_ID) as HTMLDivElement | null;
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = FLOW_PROGRESS_ID;
+    bar.setAttribute("role", "progressbar");
+    bar.setAttribute("aria-label", "Reading progress");
+    bar.style.cssText = `
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 4px;
+      z-index: 2147483644;
+      background: rgba(25, 39, 48, 0.16);
+      pointer-events: none;
+      display: none;
+    `;
+
+    const fill = document.createElement("div");
+    fill.id = FLOW_PROGRESS_FILL_ID;
+    fill.style.cssText = `
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #1f8a70, #61cbb0);
+      transition: width 0.16s ease;
+    `;
+    bar.appendChild(fill);
+    document.documentElement.appendChild(bar);
+  }
+  return bar;
+}
+
+function ensureFlowMarkerButton(): HTMLButtonElement {
+  let marker = document.getElementById(FLOW_MARKER_ID) as HTMLButtonElement | null;
+  if (!marker) {
+    marker = document.createElement("button");
+    marker.id = FLOW_MARKER_ID;
+    marker.type = "button";
+    marker.textContent = "Continue where you left";
+    marker.style.cssText = `
+      position: fixed;
+      top: 10px;
+      right: 12px;
+      z-index: 2147483644;
+      border: 1px solid #9ec9ba;
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #0f4f40;
+      background: #e2f5ee;
+      cursor: pointer;
+      display: none;
+      box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18);
+    `;
+    marker.addEventListener("click", () => {
+      if (!flowResumeParagraph || !flowResumeParagraph.isConnected) return;
+      flowResumeParagraph.scrollIntoView({ behavior: "smooth", block: "center" });
+      setQuickStatus("Returned to your last reading position.");
+    });
+    document.documentElement.appendChild(marker);
+  }
+  return marker;
+}
+
+function hideFlowUi(): void {
+  const progress = document.getElementById(FLOW_PROGRESS_ID);
+  if (progress) progress.style.display = "none";
+  const marker = document.getElementById(FLOW_MARKER_ID);
+  if (marker) marker.style.display = "none";
+}
+
+function collectFlowParagraphs(): HTMLElement[] {
+  const main = estimateMainElement() ?? document.body;
+  if (!main) return [];
+
+  const nodes = Array.from(main.querySelectorAll("p, li, blockquote")) as HTMLElement[];
+  const out: HTMLElement[] = [];
+
+  for (const el of nodes) {
+    if (el.closest("nav,aside,header,footer,[role='navigation'],[role='complementary']")) {
+      continue;
+    }
+    const text = (el.innerText || "").replace(/\s+/g, " ").trim();
+    if (text.length < FLOW_MIN_CHARS) continue;
+    const style = window.getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    out.push(el);
+  }
+
+  return out;
+}
+
+async function saveFlowPosition(index: number): Promise<void> {
+  if (index < 0 || index >= flowParagraphs.length) return;
+  const now = Date.now();
+  if (now - flowLastSavedAt < FLOW_SYNC_MS) return;
+  flowLastSavedAt = now;
+
+  try {
+    await chrome.storage.local.set({
+      [FLOW_STORAGE_KEY]: {
+        key: readingFlowPageKey(),
+        index,
+        scrollY: window.scrollY,
+        at: now,
+      },
+    });
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+async function restoreFlowPosition(): Promise<void> {
+  try {
+    const raw = await chrome.storage.local.get(FLOW_STORAGE_KEY);
+    const stored = raw[FLOW_STORAGE_KEY] as
+      | { key?: string; index?: number; scrollY?: number; at?: number }
+      | undefined;
+
+    if (!stored || stored.key !== readingFlowPageKey()) return;
+    if (typeof stored.index !== "number") return;
+
+    const idx = Math.max(0, Math.min(flowParagraphs.length - 1, Math.round(stored.index)));
+    const target = flowParagraphs[idx];
+    if (!target) return;
+
+    if (flowResumeParagraph && flowResumeParagraph !== target) {
+      flowResumeParagraph.removeAttribute(FLOW_RESUME_ATTR);
+    }
+
+    flowResumeParagraph = target;
+    target.setAttribute(FLOW_RESUME_ATTR, "1");
+
+    const marker = ensureFlowMarkerButton();
+    marker.style.display = "block";
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function clearFlowHighlights(): void {
+  if (flowCurrentParagraph) {
+    flowCurrentParagraph.removeAttribute(FLOW_CURRENT_ATTR);
+    flowCurrentParagraph = null;
+  }
+  if (flowResumeParagraph) {
+    flowResumeParagraph.removeAttribute(FLOW_RESUME_ATTR);
+    flowResumeParagraph = null;
+  }
+}
+
+function nearestFlowIndex(): number {
+  if (!flowParagraphs.length) return -1;
+  const anchorY = window.innerHeight * 0.35;
+
+  let best = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < flowParagraphs.length; i++) {
+    const rect = flowParagraphs[i].getBoundingClientRect();
+    const center = rect.top + rect.height * 0.5;
+    const dist = Math.abs(center - anchorY);
+    if (dist < bestDistance) {
+      bestDistance = dist;
+      best = i;
+    }
+  }
+  return best;
+}
+
+function updateFlowProgressVisual(index: number): void {
+  const bar = ensureFlowProgressBar();
+  bar.style.display = flowParagraphs.length > 0 ? "block" : "none";
+  bar.setAttribute("aria-valuemin", "0");
+  bar.setAttribute("aria-valuemax", String(Math.max(1, flowParagraphs.length)));
+  bar.setAttribute("aria-valuenow", String(Math.max(0, index + 1)));
+
+  const fill = document.getElementById(FLOW_PROGRESS_FILL_ID) as HTMLDivElement | null;
+  if (!fill) return;
+  const ratio = flowParagraphs.length ? (index + 1) / flowParagraphs.length : 0;
+  fill.style.width = `${Math.max(0, Math.min(100, ratio * 100)).toFixed(2)}%`;
+}
+
+function updateReadingFlowNow(): void {
+  if (!readingFlowEnabled) return;
+  if (!flowParagraphs.length) {
+    hideFlowUi();
+    return;
+  }
+
+  const index = nearestFlowIndex();
+  if (index < 0) return;
+
+  const next = flowParagraphs[index];
+  if (flowCurrentParagraph !== next) {
+    if (flowCurrentParagraph) {
+      flowCurrentParagraph.removeAttribute(FLOW_CURRENT_ATTR);
+    }
+    flowCurrentParagraph = next;
+    flowCurrentParagraph.setAttribute(FLOW_CURRENT_ATTR, "1");
+  }
+
+  updateFlowProgressVisual(index);
+  void saveFlowPosition(index);
+}
+
+function scheduleReadingFlowUpdate(): void {
+  if (flowUpdateRaf) return;
+  flowUpdateRaf = window.requestAnimationFrame(() => {
+    flowUpdateRaf = 0;
+    updateReadingFlowNow();
+  });
+}
+
+function enableReadingFlowAssistant(): void {
+  if (readingFlowEnabled) {
+    scheduleReadingFlowUpdate();
+    return;
+  }
+
+  readingFlowEnabled = true;
+  flowParagraphs = collectFlowParagraphs();
+  ensureFlowProgressBar();
+  ensureFlowMarkerButton();
+  void restoreFlowPosition();
+
+  window.addEventListener("scroll", scheduleReadingFlowUpdate, true);
+  window.addEventListener("resize", scheduleReadingFlowUpdate);
+  scheduleReadingFlowUpdate();
+}
+
+function disableReadingFlowAssistant(): void {
+  if (!readingFlowEnabled) return;
+
+  readingFlowEnabled = false;
+  window.removeEventListener("scroll", scheduleReadingFlowUpdate, true);
+  window.removeEventListener("resize", scheduleReadingFlowUpdate);
+
+  if (flowUpdateRaf) {
+    window.cancelAnimationFrame(flowUpdateRaf);
+    flowUpdateRaf = 0;
+  }
+
+  clearFlowHighlights();
+  flowParagraphs = [];
+  hideFlowUi();
+}
+
+function bulletHintsFromSummary(summary: string): string[] {
+  return summary
+    .split(/\n+/)
+    .map((line) => line.replace(/^[-*•]\s*/, "").trim())
+    .filter((line) => line.length > 20)
+    .slice(0, 3);
+}
+
+function buildSmartTldr(text: string, hints: string[] = []): string {
+  const raw = text.slice(0, MAX_TEXT_FOR_LOCAL).replace(/\s+/g, " ").trim();
+  if (!raw) return "No content to summarize.";
+
+  const sentences = raw
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const oneLine = sentences[0] || raw.slice(0, 160);
+  const bullets = hints.length ? hints : sentences.slice(0, 3);
+  const takeaway = sentences[1] || oneLine;
+
+  const bulletLines = (bullets.length ? bullets : [oneLine])
+    .slice(0, 3)
+    .map((line) => `- ${line}`)
+    .join("\n");
+
+  return [
+    `1-line summary: ${oneLine}`,
+    "",
+    "3 key bullet points:",
+    bulletLines,
+    "",
+    `Key takeaway: ${takeaway}`,
+  ].join("\n");
+}
+
+function buildStructuredLayoutText(analysis: PageAnalysis): string {
+  const title =
+    document.querySelector("h1")?.textContent?.trim() ||
+    document.title ||
+    "Untitled page";
+
+  const ranked = (analysis.blocks || [])
+    .filter((b) => b.category === "main-content" || b.category === "dense-text" || b.category === "other")
+    .sort((a, b) => b.relevance - a.relevance)
+    .slice(0, MAX_STRUCTURED_SECTIONS);
+
+  const sections = ranked.map((block, idx) => {
+    const sentences = block.text
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 3);
+    const bullets = (sentences.length ? sentences : [block.text.slice(0, 180)])
+      .map((s) => `- ${s}`)
+      .join("\n");
+    return `Section ${idx + 1}\n${bullets}`;
+  });
+
+  return [
+    `Title: ${title}`,
+    "",
+    "Structured sections:",
+    sections.join("\n\n") || "No main sections found.",
+  ].join("\n");
+}
+
+function setImportanceHeatmapEnabled(enabled: boolean): void {
+  importanceHeatmapEnabled = enabled;
+  if (enabled) {
+    void getPageAnalysis(true);
+    const count = applyImportanceHeatmap(10);
+    setQuickStatus(count > 0 ? `Highlighted ${count} important blocks.` : "No important blocks found.");
+  } else {
+    clearImportanceHeatmap();
+    setQuickStatus("Importance highlights cleared.");
+  }
+}
+
 function shouldIgnoreDistractionTarget(el: HTMLElement): boolean {
   if (el === document.body || el === document.documentElement) return true;
   if (el.id === OVERLAY_ID || el.id === FOCUS_ID || el.id === RULER_ID) return true;
+  if (el.id === FLOW_PROGRESS_ID || el.id === FLOW_MARKER_ID) return true;
+  if (el.id === QUICK_LAUNCHER_ID || el.id === QUICK_PANEL_ID) return true;
   if (el.id === TOOLTIP_BTN_ID || el.id === TOOLTIP_BUBBLE_ID) return true;
   if (el.matches("[data-neuro-inclusive]")) return true;
   if (el.closest(`[data-neuro-inclusive="theme"]`)) return true;
@@ -215,6 +666,45 @@ function restoreDistractionElements(): void {
     });
 }
 
+function applyFloatingClutterHeuristic(): void {
+  const selector = [
+    '[style*="position:fixed"]',
+    '[style*="position: fixed"]',
+    '[style*="position:sticky"]',
+    '[style*="position: sticky"]',
+    '[class*="sticky"]',
+    '[class*="floating"]',
+    '[id*="sticky"]',
+    '[id*="floating"]',
+  ].join(",");
+
+  const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
+  const candidates = Array.from(document.querySelectorAll(selector)) as HTMLElement[];
+
+  for (const el of candidates) {
+    if (shouldIgnoreDistractionTarget(el) || el.closest("form")) continue;
+
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+
+    const area = rect.width * rect.height;
+    if (area < viewportArea * 0.015) continue;
+
+    const touchesCenter =
+      rect.left < window.innerWidth * 0.75 &&
+      rect.right > window.innerWidth * 0.25 &&
+      rect.top < window.innerHeight * 0.75 &&
+      rect.bottom > window.innerHeight * 0.25;
+
+    if (touchesCenter || area > viewportArea * 0.22) {
+      hideDistractionElement(el);
+    } else {
+      dimDistractionElement(el);
+    }
+  }
+}
+
 function applyDistractionReductionNow(forceAnalysis = false): void {
   void getPageAnalysis(forceAnalysis);
 
@@ -232,6 +722,7 @@ function applyDistractionReductionNow(forceAnalysis = false): void {
   for (const el of hideByTraversal) hideDistractionElement(el);
   for (const el of dimBySelectors) dimDistractionElement(el);
   for (const el of dimByTraversal) dimDistractionElement(el);
+  applyFloatingClutterHeuristic();
 
   document.querySelectorAll("video[autoplay],audio[autoplay]").forEach((media) => {
     try {
@@ -243,6 +734,24 @@ function applyDistractionReductionNow(forceAnalysis = false): void {
       dimDistractionElement(playable as HTMLElement);
     } catch {
       /* ignore */
+    }
+  });
+}
+
+function applyCalmModeMediaControl(theme: PageSettings["theme"]): void {
+  if (theme !== "autism") return;
+
+  document.querySelectorAll("video[autoplay],audio[autoplay]").forEach((media) => {
+    try {
+      const playable = media as HTMLMediaElement;
+      if (!playable.paused) {
+        playable.pause();
+      }
+      playable.setAttribute(PAUSED_BY_EXTENSION_ATTR, "1");
+      playable.controls = true;
+      playable.muted = true;
+    } catch {
+      // Ignore media errors.
     }
   });
 }
@@ -270,6 +779,9 @@ function ensureDistractionObserver(): void {
 }
 
 function applySettings(settings: PageSettings): void {
+  currentSettings = { ...settings };
+  syncQuickToggleState();
+
   const html = document.documentElement;
   invalidateAnalysisCache();
 
@@ -292,7 +804,14 @@ function applySettings(settings: PageSettings): void {
     html.removeAttribute("data-neuro-inclusive-distract");
     if (distractionEl) distractionEl.textContent = "";
     restoreDistractionElements();
+
+    if (settings.theme === "autism") {
+      // Autism calm mode keeps only core content cues even without full distraction toggle.
+      applyDistractionReductionNow(true);
+    }
   }
+
+  applyCalmModeMediaControl(settings.theme);
 
   ensureStyleEl().textContent = buildThemeCss(
     settings.fontSizePx,
@@ -308,6 +827,12 @@ function applySettings(settings: PageSettings): void {
     removeFocusOverlay();
   }
 
+  if (settings.focusMode || settings.readabilityMode) {
+    enableReadingFlowAssistant();
+  } else {
+    disableReadingFlowAssistant();
+  }
+
   document.querySelectorAll(".neuro-inclusive-main").forEach((n) => {
     n.classList.remove("neuro-inclusive-main");
   });
@@ -318,6 +843,15 @@ function applySettings(settings: PageSettings): void {
 
   applyReadingRuler(settings.readingRuler);
   applyBionicReading(settings.bionicReading);
+
+  if (settings.theme === "autism") {
+    if (!importanceHeatmapEnabled) {
+      setImportanceHeatmapEnabled(true);
+    }
+  } else if (importanceHeatmapEnabled) {
+    setImportanceHeatmapEnabled(false);
+  }
+
   if (settings.readabilityMode || settings.distractionReduction) {
     void getPageAnalysis(true);
   }
@@ -430,46 +964,59 @@ function ensureFocusOverlay(): HTMLDivElement {
     hole.setAttribute("role", "presentation");
     hole.style.cssText = `
       position: fixed;
+      inset: 0;
       z-index: 2147483640;
       pointer-events: none;
-      box-shadow: 0 0 0 9999px rgba(0,0,0,0.55);
-      border-radius: 4px;
-      transition: box-shadow 0.25s ease;
+      display: none;
+      background: radial-gradient(circle 170px at 50% 35%, rgba(0,0,0,0), rgba(0,0,0,0.02) 58%, rgba(8,12,16,0.62) 100%);
+      backdrop-filter: blur(1px);
+      transition: background 0.08s linear;
     `;
     document.documentElement.appendChild(hole);
   }
   return hole;
 }
 
-function positionFocusOverlay(): void {
-  const main = focusMainEl && focusMainEl.isConnected ? focusMainEl : estimateMainElement();
-  focusMainEl = main;
-  const rect = main?.getBoundingClientRect() ?? {
-    top: 64,
-    left: 24,
-    width: Math.min(window.innerWidth - 48, 720),
-    height: window.innerHeight - 128,
-  };
-
+function paintFocusOverlay(): void {
+  const safeX = Math.max(24, Math.min(window.innerWidth - 24, focusPointerX));
+  const safeY = Math.max(24, Math.min(window.innerHeight - 24, focusPointerY));
   const hole = ensureFocusOverlay();
-  const pad = 12;
-  hole.style.top = `${rect.top - pad}px`;
-  hole.style.left = `${rect.left - pad}px`;
-  hole.style.width = `${rect.width + pad * 2}px`;
-  hole.style.height = `${rect.height + pad * 2}px`;
+  const inner = Math.max(24, FOCUS_SPOTLIGHT_RADIUS - FOCUS_EDGE_SOFTNESS);
+  const outer = FOCUS_SPOTLIGHT_RADIUS + FOCUS_EDGE_SOFTNESS;
+  hole.style.background = `radial-gradient(circle ${outer}px at ${safeX}px ${safeY}px, rgba(0,0,0,0) 0px, rgba(0,0,0,0.02) ${inner}px, rgba(8,12,16,${FOCUS_DIM_ALPHA}) ${outer}px)`;
 }
 
-function onFocusViewportChange() {
+function scheduleFocusOverlayPaint(): void {
   if (focusRaf) return;
   focusRaf = window.requestAnimationFrame(() => {
     focusRaf = 0;
-    positionFocusOverlay();
+    paintFocusOverlay();
   });
+}
+
+function onFocusPointerMove(e: MouseEvent): void {
+  focusPointerX = e.clientX;
+  focusPointerY = e.clientY;
+  scheduleFocusOverlayPaint();
+}
+
+function onFocusTouchMove(e: TouchEvent): void {
+  const t = e.touches[0];
+  if (!t) return;
+  focusPointerX = t.clientX;
+  focusPointerY = t.clientY;
+  scheduleFocusOverlayPaint();
+}
+
+function onFocusViewportChange() {
+  scheduleFocusOverlayPaint();
 }
 
 function attachFocusListeners(): void {
   if (focusListenersAttached) return;
   focusListenersAttached = true;
+  window.addEventListener("mousemove", onFocusPointerMove, true);
+  window.addEventListener("touchmove", onFocusTouchMove, { passive: true });
   window.addEventListener("scroll", onFocusViewportChange, true);
   window.addEventListener("resize", onFocusViewportChange);
 }
@@ -477,6 +1024,8 @@ function attachFocusListeners(): void {
 function detachFocusListeners(): void {
   if (!focusListenersAttached) return;
   focusListenersAttached = false;
+  window.removeEventListener("mousemove", onFocusPointerMove, true);
+  window.removeEventListener("touchmove", onFocusTouchMove);
   window.removeEventListener("scroll", onFocusViewportChange, true);
   window.removeEventListener("resize", onFocusViewportChange);
   if (focusRaf) {
@@ -487,15 +1036,19 @@ function detachFocusListeners(): void {
 
 function removeFocusOverlay(): void {
   detachFocusListeners();
-  focusMainEl = null;
   document.getElementById(FOCUS_ID)?.remove();
 }
 
 function showFocusOverlay(): void {
-  focusMainEl = estimateMainElement();
+  const main = estimateMainElement();
+  if (main) {
+    const rect = main.getBoundingClientRect();
+    focusPointerX = Math.max(24, Math.min(window.innerWidth - 24, rect.left + rect.width * 0.4));
+    focusPointerY = Math.max(24, Math.min(window.innerHeight - 24, rect.top + 84));
+  }
   const hole = ensureFocusOverlay();
   hole.style.display = "block";
-  positionFocusOverlay();
+  scheduleFocusOverlayPaint();
   attachFocusListeners();
 }
 
@@ -533,6 +1086,337 @@ function showSimplifiedPanel(text: string, visible: boolean): void {
   const el = ensureSimplifiedPanel();
   el.textContent = text;
   el.style.display = visible ? "block" : "none";
+}
+
+function setQuickStatus(text: string): void {
+  if (!quickStatusEl) return;
+  quickStatusEl.textContent = text;
+}
+
+function syncQuickToggleState(): void {
+  if (quickReadabilityInput) quickReadabilityInput.checked = currentSettings.readabilityMode;
+  if (quickDistractionInput) quickDistractionInput.checked = currentSettings.distractionReduction;
+  if (quickFocusInput) quickFocusInput.checked = currentSettings.focusMode;
+  if (quickImportanceInput) quickImportanceInput.checked = importanceHeatmapEnabled;
+}
+
+function setQuickPanelOpen(open: boolean): void {
+  if (!quickPanelEl || !quickLauncherEl) return;
+  quickPanelEl.style.display = open ? "block" : "none";
+  quickLauncherEl.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+function ensureQuickLauncher(): HTMLButtonElement {
+  if (quickLauncherEl) return quickLauncherEl;
+
+  quickLauncherEl = document.createElement("button");
+  quickLauncherEl.id = QUICK_LAUNCHER_ID;
+  quickLauncherEl.type = "button";
+  quickLauncherEl.setAttribute("aria-label", "Open Neuro menu");
+  quickLauncherEl.setAttribute("aria-expanded", "false");
+  quickLauncherEl.textContent = "Neuro";
+  quickLauncherEl.style.cssText = `
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 2147483645;
+    border: 0;
+    border-radius: 999px;
+    padding: 10px 14px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    color: #ffffff;
+    background: linear-gradient(135deg, #1f8a70, #15604f);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
+  `;
+  quickLauncherEl.addEventListener("click", () => {
+    if (!quickPanelEl) {
+      ensureQuickPanel();
+    }
+    const open = quickPanelEl?.style.display === "block";
+    setQuickPanelOpen(!open);
+  });
+
+  document.documentElement.appendChild(quickLauncherEl);
+  return quickLauncherEl;
+}
+
+async function simplifyFromQuickMenu(): Promise<void> {
+  setQuickStatus("Simplifying...");
+
+  const analysis = getPageAnalysis(true);
+  const sourceText = (analysis.prioritizedText || analysis.text).trim();
+  if (!sourceText) {
+    setQuickStatus("No visible text found on this page.");
+    return;
+  }
+
+  const needsAi =
+    sourceText.length > 1400 ||
+    analysis.difficultTerms.length >= 4 ||
+    (analysis.domStats.denseTextBlocks ?? 0) >= 2;
+
+  const aiInput = sourceText.slice(0, MAX_TEXT_FOR_REMOTE);
+  let simplified = "";
+  let statusSuffix = "";
+
+  if (needsAi) {
+    const res = await bgRequest({
+      type: "API_SIMPLIFY",
+      text: aiInput,
+      apiBase: currentApiBase,
+    });
+    if (res.ok && typeof res.simplified === "string" && res.simplified.trim()) {
+      simplified = res.simplified.trim();
+      statusSuffix = "AI";
+    } else {
+      simplified = localSimplifyFallback(sourceText);
+      statusSuffix = "fallback";
+    }
+  } else {
+    simplified = localSimplifyFallback(sourceText);
+    statusSuffix = "local";
+  }
+
+  showSimplifiedPanel(simplified, true);
+  setQuickStatus(`Simplified (${statusSuffix}).`);
+}
+
+async function summarizeFromQuickMenu(mode: "tldr" | "bullets"): Promise<void> {
+  setQuickStatus(mode === "tldr" ? "Creating TL;DR..." : "Creating key points...");
+
+  const analysis = getPageAnalysis(true);
+  const sourceText = (analysis.prioritizedText || analysis.text).trim();
+  if (!sourceText) {
+    setQuickStatus("No visible text found on this page.");
+    return;
+  }
+
+  if (mode === "tldr") {
+    const [tldrRes, bulletsRes] = await Promise.all([
+      bgRequest({
+        type: "API_SUMMARIZE",
+        text: sourceText.slice(0, MAX_TEXT_FOR_REMOTE),
+        mode: "tldr",
+        apiBase: currentApiBase,
+      }),
+      bgRequest({
+        type: "API_SUMMARIZE",
+        text: sourceText.slice(0, MAX_TEXT_FOR_REMOTE),
+        mode: "bullets",
+        apiBase: currentApiBase,
+      }),
+    ]);
+
+    const tldrText =
+      tldrRes.ok && typeof tldrRes.summary === "string" && tldrRes.summary.trim()
+        ? tldrRes.summary.trim()
+        : localSummarizeFallback(sourceText, "tldr");
+
+    const bulletText =
+      bulletsRes.ok && typeof bulletsRes.summary === "string" && bulletsRes.summary.trim()
+        ? bulletsRes.summary.trim()
+        : localSummarizeFallback(sourceText, "bullets");
+
+    const smart = buildSmartTldr(
+      `${tldrText}\n${sourceText}`,
+      bulletHintsFromSummary(bulletText)
+    );
+    showSimplifiedPanel(smart, true);
+    setQuickStatus("Smart TL;DR ready.");
+    return;
+  }
+
+  const res = await bgRequest({
+    type: "API_SUMMARIZE",
+    text: sourceText.slice(0, MAX_TEXT_FOR_REMOTE),
+    mode: "bullets",
+    apiBase: currentApiBase,
+  });
+
+  const summary =
+    res.ok && typeof res.summary === "string" && res.summary.trim()
+      ? res.summary.trim()
+      : localSummarizeFallback(sourceText, "bullets");
+
+  showSimplifiedPanel(summary, true);
+  setQuickStatus(res.ok ? "Key points ready." : "Key points fallback used.");
+}
+
+function showStructuredLayoutFromQuickMenu(): void {
+  const analysis = getPageAnalysis(true);
+  const structured = buildStructuredLayoutText(analysis);
+  showSimplifiedPanel(structured, true);
+  setQuickStatus("Structured layout ready.");
+}
+
+function continueReadingFromMarker(): void {
+  if (!flowResumeParagraph || !flowResumeParagraph.isConnected) {
+    setQuickStatus("No saved reading position yet.");
+    return;
+  }
+  flowResumeParagraph.scrollIntoView({ behavior: "smooth", block: "center" });
+  setQuickStatus("Continued from your last reading point.");
+}
+
+function ensureQuickPanel(): HTMLDivElement {
+  if (quickPanelEl) return quickPanelEl;
+
+  const panel = document.createElement("div");
+  panel.id = QUICK_PANEL_ID;
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-label", "Neuro menu");
+  panel.style.cssText = `
+    position: fixed;
+    right: 16px;
+    bottom: 64px;
+    width: min(320px, 88vw);
+    z-index: 2147483645;
+    border-radius: 12px;
+    background: #f7fbff;
+    color: #1f2f3a;
+    border: 1px solid #c9d9e5;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+    padding: 10px;
+    display: none;
+    font-family: "Segoe UI", Arial, sans-serif;
+  `;
+
+  const titleRow = document.createElement("div");
+  titleRow.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;";
+  const title = document.createElement("strong");
+  title.textContent = "Neuro menu";
+  title.style.cssText = "font-size:13px;";
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.textContent = "Close";
+  closeBtn.style.cssText = "border:1px solid #bfd0de;border-radius:8px;background:#ffffff;color:#1f2f3a;padding:5px 8px;font-size:11px;cursor:pointer;";
+  closeBtn.addEventListener("click", () => setQuickPanelOpen(false));
+  titleRow.append(title, closeBtn);
+
+  const makeToggle = (
+    labelText: string,
+    onChange: (checked: boolean) => void
+  ): HTMLInputElement => {
+    const label = document.createElement("label");
+    label.style.cssText = "display:flex;align-items:center;gap:8px;font-size:12px;margin:4px 0;";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.addEventListener("change", () => onChange(input.checked));
+    const span = document.createElement("span");
+    span.textContent = labelText;
+    label.append(input, span);
+    panel.appendChild(label);
+    return input;
+  };
+
+  const togglesTitle = document.createElement("div");
+  togglesTitle.textContent = "Quick settings";
+  togglesTitle.style.cssText = "font-size:11px;font-weight:600;color:#547087;margin:6px 0 2px;";
+
+  panel.appendChild(titleRow);
+  panel.appendChild(togglesTitle);
+
+  quickReadabilityInput = makeToggle("Readability mode", (checked) => {
+    currentSettings = { ...currentSettings, readabilityMode: checked };
+    applySettings(currentSettings);
+    setQuickStatus("Readability updated.");
+  });
+
+  quickDistractionInput = makeToggle("Reduce distractions", (checked) => {
+    currentSettings = { ...currentSettings, distractionReduction: checked };
+    applySettings(currentSettings);
+    setQuickStatus("Distraction setting updated.");
+  });
+
+  quickFocusInput = makeToggle("Cursor spotlight (dim rest)", (checked) => {
+    currentSettings = { ...currentSettings, focusMode: checked };
+    applySettings(currentSettings);
+    setQuickStatus("Cursor spotlight updated.");
+  });
+
+  quickImportanceInput = makeToggle("Importance heatmap", (checked) => {
+    setImportanceHeatmapEnabled(checked);
+    syncQuickToggleState();
+  });
+
+  const actions = document.createElement("div");
+  actions.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;";
+
+  const simplifyBtn = document.createElement("button");
+  simplifyBtn.type = "button";
+  simplifyBtn.textContent = "Simplify";
+  simplifyBtn.style.cssText = "border:0;border-radius:8px;padding:7px 8px;background:#1f8a70;color:#ffffff;font-size:12px;cursor:pointer;";
+  simplifyBtn.addEventListener("click", () => {
+    void simplifyFromQuickMenu();
+  });
+
+  const tldrBtn = document.createElement("button");
+  tldrBtn.type = "button";
+  tldrBtn.textContent = "TL;DR";
+  tldrBtn.style.cssText = "border:0;border-radius:8px;padding:7px 8px;background:#dbe9f3;color:#1f2f3a;font-size:12px;cursor:pointer;";
+  tldrBtn.addEventListener("click", () => {
+    void summarizeFromQuickMenu("tldr");
+  });
+
+  const bulletsBtn = document.createElement("button");
+  bulletsBtn.type = "button";
+  bulletsBtn.textContent = "Key points";
+  bulletsBtn.style.cssText = "border:0;border-radius:8px;padding:7px 8px;background:#dbe9f3;color:#1f2f3a;font-size:12px;cursor:pointer;";
+  bulletsBtn.addEventListener("click", () => {
+    void summarizeFromQuickMenu("bullets");
+  });
+
+  const structuredBtn = document.createElement("button");
+  structuredBtn.type = "button";
+  structuredBtn.textContent = "Structured view";
+  structuredBtn.style.cssText = "border:0;border-radius:8px;padding:7px 8px;background:#e4eef7;color:#1f2f3a;font-size:12px;cursor:pointer;";
+  structuredBtn.addEventListener("click", () => {
+    showStructuredLayoutFromQuickMenu();
+  });
+
+  const continueBtn = document.createElement("button");
+  continueBtn.type = "button";
+  continueBtn.textContent = "Continue reading";
+  continueBtn.style.cssText = "border:0;border-radius:8px;padding:7px 8px;background:#e4eef7;color:#1f2f3a;font-size:12px;cursor:pointer;";
+  continueBtn.addEventListener("click", () => {
+    continueReadingFromMarker();
+  });
+
+  const hideTextBtn = document.createElement("button");
+  hideTextBtn.type = "button";
+  hideTextBtn.textContent = "Hide text panel";
+  hideTextBtn.style.cssText = "border:0;border-radius:8px;padding:7px 8px;background:#ffffff;color:#3a4f60;font-size:12px;cursor:pointer;border:1px solid #c9d9e5;";
+  hideTextBtn.addEventListener("click", () => {
+    showSimplifiedPanel("", false);
+    setQuickStatus("Text panel hidden.");
+  });
+
+  actions.append(
+    simplifyBtn,
+    tldrBtn,
+    bulletsBtn,
+    structuredBtn,
+    continueBtn,
+    hideTextBtn
+  );
+  panel.appendChild(actions);
+
+  quickStatusEl = document.createElement("div");
+  quickStatusEl.style.cssText = "margin-top:8px;padding:6px 8px;border-radius:8px;background:#ecf4fa;color:#375164;font-size:11px;line-height:1.3;";
+  quickStatusEl.textContent = "Ready.";
+  panel.appendChild(quickStatusEl);
+
+  document.documentElement.appendChild(panel);
+  quickPanelEl = panel;
+  syncQuickToggleState();
+  return panel;
+}
+
+function ensureQuickMenu(): void {
+  ensureQuickLauncher();
+  ensureQuickPanel();
 }
 
 // HOVER-TO-EXPLAIN TOOLTIP
@@ -585,14 +1469,18 @@ function ensureExplainBtn() {
         } else {
           const hint =
             !res.ok && res.error
-              ? `${localDefine(text)} (${res.error})`
-              : localDefine(text);
+              ? `${localDefineFallback(text)} (${res.error})`
+              : localDefineFallback(text);
           showExplainBubble(hint, el!.style.left, el!.style.top);
         }
       } catch (e) {
         if (requestId !== explainRequestId) return;
         const err = e instanceof Error ? e.message : "Network error";
-        showExplainBubble(`${localDefine(text)} (${err})`, el!.style.left, el!.style.top);
+        showExplainBubble(
+          `${localDefineFallback(text)} (${err})`,
+          el!.style.left,
+          el!.style.top
+        );
       } finally {
         if (requestId === explainRequestId) {
           el!.style.display = "none";
@@ -642,18 +1530,32 @@ function showExplainBubble(text: string, left: string, top: string) {
 }
 
 document.addEventListener("mouseup", () => {
-  const sel = window.getSelection();
   const btn = ensureExplainBtn();
-  const selected =
-    sel && sel.rangeCount > 0 ? sel.toString().trim() : "";
-    if (selected.length > 0 && selected.length <= MAX_EXPLAIN_SELECTION) {
-     const range = sel!.getRangeAt(0);
-     const rect = range.getBoundingClientRect();
-     btn.style.left = `${rect.right + window.scrollX + 5}px`;
-     btn.style.top = `${rect.top + window.scrollY - 20}px`;
-     btn.style.display = "block";
-  } else {
+  try {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) {
       btn.style.display = "none";
+      return;
+    }
+
+    const selected = sel.toString().trim();
+    if (selected.length === 0 || selected.length > MAX_EXPLAIN_SELECTION) {
+      btn.style.display = "none";
+      return;
+    }
+
+    const range = sel.getRangeAt(0);
+    const rect = range.getBoundingClientRect();
+    if (!Number.isFinite(rect.top) || !Number.isFinite(rect.right)) {
+      btn.style.display = "none";
+      return;
+    }
+
+    btn.style.left = `${rect.right + window.scrollX + 5}px`;
+    btn.style.top = `${rect.top + window.scrollY - 20}px`;
+    btn.style.display = "block";
+  } catch {
+    btn.style.display = "none";
   }
 });
 
@@ -676,6 +1578,12 @@ function collectDomStats(): DomStats {
       maxDepthSample: 0,
     };
   }
+}
+
+try {
+  ensureQuickMenu();
+} catch (e) {
+  console.warn("[Neuro-Inclusive] quick menu init failed:", normalizeError(e));
 }
 
 chrome.runtime.onMessage.addListener(
@@ -723,9 +1631,29 @@ chrome.runtime.onMessage.addListener(
     return sendResponse({ ok: false, error: "Unknown message" });
   }
 );
+
+try {
+  document.documentElement.setAttribute(READY_ATTR, "1");
+} catch {
+  // Ignore readiness marker failures on unusual documents.
+}
 }
 
-if (!document.documentElement.getAttribute(GUARD_ATTR)) {
-  document.documentElement.setAttribute(GUARD_ATTR, "1");
-  initContentScript();
+const docEl = document.documentElement;
+const hasGuard = docEl?.getAttribute(GUARD_ATTR) === "1";
+const isReady = docEl?.getAttribute(READY_ATTR) === "1";
+
+if (docEl && (!hasGuard || !isReady)) {
+  if (hasGuard && !isReady) {
+    docEl.removeAttribute(GUARD_ATTR);
+  }
+
+  docEl.setAttribute(GUARD_ATTR, "1");
+  try {
+    initContentScript();
+  } catch (e) {
+    console.error("[Neuro-Inclusive] content init failed:", e);
+    docEl.removeAttribute(GUARD_ATTR);
+    docEl.removeAttribute(READY_ATTR);
+  }
 }

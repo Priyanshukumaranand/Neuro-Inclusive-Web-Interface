@@ -51,6 +51,13 @@ export function buildThemeCss(
       background: #eceff1 !important;
       color: #37474f !important;
     }
+    html[${BASE_ATTR}].theme-autism,
+    html[${BASE_ATTR}].theme-autism * {
+      animation: none !important;
+      transition-duration: 0s !important;
+      transition-delay: 0s !important;
+      scroll-behavior: auto !important;
+    }
     html[${BASE_ATTR}].theme-autism a {
       color: #455a64 !important;
     }
@@ -62,6 +69,26 @@ export function buildThemeCss(
         rgba(255, 214, 102, 0.12),
         rgba(255, 214, 102, 0)
       ) !important;
+    }
+    html[${BASE_ATTR}] [data-neuro-inclusive-flow-current="1"] {
+      background: rgba(128, 200, 255, 0.18) !important;
+      border-radius: 8px !important;
+      box-shadow: 0 0 0 2px rgba(78, 146, 196, 0.35) !important;
+      scroll-margin-top: 72px !important;
+    }
+    html[${BASE_ATTR}] [data-neuro-inclusive-flow-resume="1"] {
+      outline: 2px dashed rgba(46, 138, 110, 0.55) !important;
+      outline-offset: 3px !important;
+      scroll-margin-top: 72px !important;
+    }
+    html[${BASE_ATTR}] [data-neuro-inclusive-importance="1"] {
+      background-image: linear-gradient(
+        90deg,
+        rgba(88, 171, 243, var(--neuro-importance-intensity, 0.28)),
+        rgba(88, 171, 243, 0)
+      ) !important;
+      border-left: 3px solid rgba(58, 128, 188, 0.7) !important;
+      padding-left: 8px !important;
     }
     ${read}
   `;

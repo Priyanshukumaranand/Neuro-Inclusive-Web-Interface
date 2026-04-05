@@ -17,7 +17,7 @@ export function simplifyUser(text: string): string {
 export const summarizeSystem = `You are a concise summarizer for accessibility. Output only what the user asks — no preamble.`;
 
 export function summarizeUserTldr(text: string): string {
-  return `Give a 2-4 sentence TL;DR of the following content:\n\n${text}`;
+  return `Give a single-sentence TL;DR (max 30 words) of the following content:\n\n${text}`;
 }
 
 export function summarizeUserBullets(text: string): string {

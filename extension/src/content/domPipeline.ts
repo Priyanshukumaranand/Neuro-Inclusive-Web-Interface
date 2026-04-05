@@ -54,6 +54,7 @@ type MutableBlock = {
 const trie = createDefaultComplexWordTrie();
 let blockSeq = 0;
 const highlightedElements = new Set<HTMLElement>();
+const importantElements = new Set<HTMLElement>();
 let lastBlocks: MutableBlock[] = [];
 
 function normalizeTextChunk(text: string): string {
@@ -508,6 +509,46 @@ export function clearDifficultHighlights(attributeName = "data-neuro-inclusive-d
     el.removeAttribute("title");
   }
   highlightedElements.clear();
+}
+
+export function applyImportanceHeatmap(
+  topN = 8,
+  attributeName = "data-neuro-inclusive-importance"
+): number {
+  for (const el of importantElements) {
+    el.removeAttribute(attributeName);
+    el.style.removeProperty("--neuro-importance-intensity");
+  }
+  importantElements.clear();
+
+  if (topN <= 0) return 0;
+
+  const ranked = [...lastBlocks]
+    .filter((block) => block.relevance > 0)
+    .sort((a, b) => b.relevance - a.relevance)
+    .slice(0, topN);
+
+  if (!ranked.length) return 0;
+
+  const maxScore = Math.max(1, ranked[0].relevance);
+  for (const block of ranked) {
+    const intensity = Math.max(0.18, Math.min(0.78, block.relevance / maxScore));
+    block.element.setAttribute(attributeName, "1");
+    block.element.style.setProperty("--neuro-importance-intensity", intensity.toFixed(2));
+    importantElements.add(block.element);
+  }
+
+  return ranked.length;
+}
+
+export function clearImportanceHeatmap(
+  attributeName = "data-neuro-inclusive-importance"
+): void {
+  for (const el of importantElements) {
+    el.removeAttribute(attributeName);
+    el.style.removeProperty("--neuro-importance-intensity");
+  }
+  importantElements.clear();
 }
 
 export function getClassifiedElements(categories: NodeCategory[]): HTMLElement[] {
